@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    />
+    <title>提醒</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 16px;
+        height: 100%;
+      }
+      .card {
+        flex: 0 0 auto;
+        min-height: 106px;
+        background: #fff;
+        border-radius: 10px;
+        border-left: 4px solid #2b6cb0;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        animation: slideIn 0.25s ease-out;
+      }
+      .card.urgent {
+        border-left-color: #d14343;
+        background: #fff8f8;
+      }
+      @keyframes slideIn {
+        from {
+          transform: translateY(12px);
+          opacity: 0;
+        }
+        to {
+          transform: translateY(0);
+          opacity: 1;
+        }
+      }
+      .title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #1f2329;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .card.urgent .title {
+        color: #b02a2a;
+      }
+      .body {
+        font-size: 12.5px;
+        color: #5c6670;
+        line-height: 1.5;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+      }
+      .actions {
+        margin-top: auto;
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+      button {
+        font-family: inherit;
+        font-size: 12px;
+        padding: 5px 12px;
+        border-radius: 6px;
+        border: 1px solid #e6e8ec;
+        background: #fff;
+        color: #1f2329;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      button:hover {
+        background: #eaf2fb;
+      }
+      button.primary {
+        background: #2b6cb0;
+        border-color: #2b6cb0;
+        color: #fff;
+      }
+      button.primary:hover {
+        filter: brightness(1.08);
+        background: #2b6cb0;
+      }
+      .card.urgent button.primary {
+        background: #d14343;
+        border-color: #d14343;
+      }
+      button.link {
+        border: none;
+        background: none;
+        color: #2b6cb0;
+        padding: 5px 4px;
+      }
+      button.link:hover {
+        text-decoration: underline;
+        background: none;
+      }
+      .all-row {
+        display: flex;
+        justify-content: flex-end;
+      }
+      @media (prefers-color-scheme: dark) {
+        .card {
+          background: #1e2126;
+          border-left-color: #5b9bd5;
+        }
+        .card.urgent {
+          background: #2a1a1a;
+          border-left-color: #e05a5a;
+        }
+        .title {
+          color: #e8eaed;
+        }
+        .card.urgent .title {
+          color: #ff8f8f;
+        }
+        .body {
+          color: #a8b0ba;
+        }
+        button {
+          background: #262a30;
+          border-color: #2c3138;
+          color: #e8eaed;
+        }
+        button:hover {
+          background: #1e2a38;
+        }
+        button.primary {
+          background: #5b9bd5;
+          border-color: #5b9bd5;
+          color: #0f1216;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="list"></div>
+    <script type="module" src="/src/toast-main.ts"></script>
+  </body>
+</html>

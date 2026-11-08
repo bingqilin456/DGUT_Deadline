@@ -1,0 +1,40 @@
+{
+  "name": "dgut-deadline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "莞工 Deadline —— 东莞理工学院作业截止提醒桌面应用（本地优先，不接 AI/云服务）",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "author": "DGUT Deadline",
+  "license": "MIT",
+  "workspaces": [
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
+    "typecheck:web": "vue-tsc -p tsconfig.web.json --noEmit",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "echo \"(lint placeholder)\"",
+    "build:win": "npm run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "electron-store": "^10.0.1",
+    "playwright-core": "^1.56.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "electron": "^38.2.0",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "typescript": "5.9.3",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.4",
+    "vue": "^3.5.22",
+    "vue-tsc": "^3.1.0"
+  }
+}

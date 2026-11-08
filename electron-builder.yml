@@ -1,0 +1,60 @@
+appId: cn.edu.dgut.deadline
+productName: 莞工Deadline
+copyright: 莞工 Deadline · 仅供个人学习使用
+
+directories:
+  output: dist
+  buildResources: build
+
+# 只打包构建产物与必要依赖，绝不把源码、调研产物、会话目录带入安装包
+files:
+  - out/**/*
+  - package.json
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!scripts/*'
+  - '!docs/*'
+  - '!investigation/*'
+  - '!PoC/*'
+  - '!packages/*'
+  - '!*.md'
+  - '!tsconfig*.json'
+  - '!electron.vite.config.ts'
+  - '!vitest.config.ts'
+
+# Playwright 启动浏览器时需要访问自身的驱动文件；
+# 若打进 ASAR，进程无法用真实文件路径加载，必须解包。
+asar: true
+asarUnpack:
+  - 'node_modules/playwright-core/**'
+
+extraResources:
+  - from: resources/icon.ico
+    to: icon.ico
+  - from: resources/tray.png
+    to: tray.png
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  artifactName: ${productName}-${version}-setup.${ext}
+  # 未签名：安装时会有 SmartScreen 提示，属预期行为
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 莞工 Deadline
+  # 卸载时保留用户数据（登录态与缓存），避免用户重装后还要重新登录
+  deleteAppDataOnUninstall: false
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  language: '2052' # 简体中文
