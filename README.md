@@ -111,7 +111,7 @@ npm run dev          # 启动开发版
 
 | # | 操作 | 目的 |
 |---|---|---|
-| 1 | 安装 `dist\莞工Deadline-0.1.0-setup.exe` | 使用正式版 |
+| 1 | 从 [Releases](https://github.com/bingqilin456/DGUT_Deadline/releases/latest) 下载并安装 `莞工Deadline-0.2.0-setup.exe` | 使用正式版 |
 | 2 | 点「莞工作业平台」的「登录」，在 Edge 里完成中央认证 | 该平台已可用（实测 20 条作业） |
 | 3 | 如要用优学院：点「登录」打开融合门户 → 登录 → 点「优学院」图标 | 绕开 LMS 损坏的登录页 |
 | 4 | 到「设置」点「发送测试通知」，确认能看到 Windows 弹窗 | 验证通知 |
