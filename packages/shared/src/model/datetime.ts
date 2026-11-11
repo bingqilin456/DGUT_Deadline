@@ -142,6 +142,77 @@ function SOrZero(): number {
   return 0;
 }
 
+/**
+ * 考试时间归一化（`ExamItem.startsAt` / `endsAt` 专用）。
+ *
+ * 为什么单独一个函数而不是复用 parseDueAt：考试**没有「只有日期」的语义**
+ * —— 「2026-12-30 考试」这句话不能推出开考时刻，若按 duePrecision='date' 返回
+ * 该日 00:00，会让一场下午的考试在凌晨就触发提醒（把不确定伪装成确定，违反红线 3）。
+ *
+ * 未验证（docs/LMS-EXAM-PLAN.md §4.5、证据表 C.6）：
+ *   · 考试接口的时间是**毫秒数字**还是 **ISO 字符串**完全没有实测响应；
+ *   · 作业接口实测是毫秒数字（PLATFORM_FINDINGS §3.5），但考试**不得**照搬这个假设。
+ *   因此这里做双格式探测，任何不确定都返回 null（不猜）。
+ *
+ * 规则：
+ *  1. 数值：`n > 1e12` 视为毫秒；`1e9 < n <= 1e12` 视为秒级（×1000，保守猜测，C.6 回填后确认）；
+ *     其余（含 0、负数、NaN、Infinity）→ null。绝不 new Date(0) 之类的伪值。
+ *  2. 字符串：复用 parseDueAt()；得到 duePrecision === 'date'（只有日期）→ null。
+ *  3. 任何解析失败 → null；调用方必须计入 warning，不允许静默丢场次。
+ *  4. 输出一律 +08:00 ISO（与 dueAt 同一套表示，便于统一比较）。
+ */
+export function parseExamTime(raw: unknown): { iso: string; precision: 'datetime' } | null {
+  if (raw === null || raw === undefined) return null;
+
+  // ── 数值形态（未验证：C.6 时间类型）────────────────────────────
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    let ms: number;
+    if (raw > 1e12) {
+      ms = raw; // 毫秒时间戳（作业接口实测形态）
+    } else if (raw > 1e9) {
+      // 秒级时间戳：保守猜测（×1000）。未验证；若真实平台用 1e9~1e12 区间的
+      // 毫秒值（即 1970~2001 年），会被误判为秒级 —— 该区间与校园考试时间不重叠。
+      ms = raw * 1000;
+    } else {
+      return null;
+    }
+    const iso = msToIsoShanghai(ms);
+    return iso === null ? null : { iso, precision: 'datetime' };
+  }
+
+  // 纯数字字符串按数值处理（平台可能把时间戳序列化成字符串，未验证）。
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    if (text === '') return null;
+    if (/^\d+$/.test(text)) return parseExamTime(Number(text));
+    const parsed = parseDueAt(text);
+    if (parsed.dueAt === null) return null;
+    // 只有日期 ⇒ 无法确定开考时刻 ⇒ 视为不可用（不猜）。
+    if (parsed.duePrecision !== 'datetime') return null;
+    return { iso: parsed.dueAt, precision: 'datetime' };
+  }
+
+  return null;
+}
+
+/** 毫秒时间戳 → +08:00 ISO；非法值返回 null。 */
+function msToIsoShanghai(ms: number): string | null {
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return null;
+  // 用固定偏移换算，不依赖运行环境本地时区。
+  const sh = new Date(ms + TZ_MS);
+  return toIsoShanghai(
+    sh.getUTCFullYear(),
+    sh.getUTCMonth() + 1,
+    sh.getUTCDate(),
+    sh.getUTCHours(),
+    sh.getUTCMinutes(),
+    sh.getUTCSeconds(),
+  );
+}
+
 /** 毫秒时间戳（用于剩余时间计算）。null -> null，调用方必须显式处理。 */
 export function dueToMs(dueAt: string | null): number | null {
   if (!dueAt) return null;
@@ -172,4 +243,36 @@ export function formatRemaining(nowMs: number, dueMs: number | null, precision: 
     return `剩 ${h} 小时 ${m} 分${suffix}`;
   }
   return `剩 ${Math.max(1, Math.floor(abs / min))} 分钟${suffix}`;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// 考试阶段推导
+// ══════════════════════════════════════════════════════════════════════
+
+export type ExamPhase = 'upcoming' | 'ongoing' | 'ended' | 'unknown';
+
+/**
+ * 由**本地归一化时间**推导考试阶段，不依赖平台 `examState`
+ * （其值域未验证，且已被前端用 `publishStatus` 合成过，不可信）。
+ *
+ * 放在 packages/shared 是因为**主进程（提醒）与渲染进程（列表）都要用**：
+ * 此前两处各写一份语义等价的实现，靠注释约定同步 —— 一旦一方改动就会漂移，
+ * 表现为「列表说进行中，提醒却说已结束」。现在只有这一份。
+ *
+ * 规则：
+ *  - 无 startsAt            => unknown（不猜）
+ *  - 未到 startsAt          => upcoming
+ *  - 已过 startsAt 且无 endsAt => ongoing（保守：不谎称已结束）
+ *  - 有 endsAt              => now < endsAt ? ongoing : ended
+ */
+export function examPhase(
+  x: { startsAt: string | null; endsAt: string | null },
+  nowMs: number,
+): ExamPhase {
+  const s = dueToMs(x.startsAt);
+  if (s === null) return 'unknown';
+  if (nowMs < s) return 'upcoming';
+  const e = dueToMs(x.endsAt);
+  if (e === null) return 'ongoing';
+  return nowMs < e ? 'ongoing' : 'ended';
 }

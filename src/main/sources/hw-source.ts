@@ -48,6 +48,7 @@ import {
   isAllowedDetailUrl,
   parseDueAt,
   type AssignmentSource,
+  type ListItemsResult,
   type ListOptions,
   type SubmissionStatus,
 } from '@dgut-deadline/shared';
@@ -132,6 +133,8 @@ interface ProfileData {
 export class HwAssignmentSource implements AssignmentSource {
   readonly source = SOURCE;
   readonly displayName = '莞工作业平台';
+  /** hw 平台只有作业模块，没有考试功能 ⇒ 不声明 'exam'，也不伪造空的考试结果。 */
+  readonly supportedKinds = ['homework'] as const;
 
   private readonly session: BrowserSession;
   private readonly limiter = new RateLimiter();
@@ -231,7 +234,7 @@ export class HwAssignmentSource implements AssignmentSource {
     }
   }
 
-  async listAssignments(options: ListOptions = {}): Promise<Assignment[]> {
+  async listAssignments(options: ListOptions = {}): Promise<ListItemsResult<Assignment>> {
     const timeoutMs = options.timeoutMs ?? 90_000;
     const page = await this.session.getPage(HOST);
     page.setDefaultTimeout(timeoutMs);
@@ -247,27 +250,41 @@ export class HwAssignmentSource implements AssignmentSource {
 
     const lastSyncAt = new Date().toISOString();
     const pageSize = 100;
+    const warnings: string[] = [];
+    /** 两个接口都读全才算 complete；任何一侧被截断都必须显式降级。 */
+    let complete = true;
 
     // ── 1. 读取作业计划（含未提交项 + submitted 标记）──────────────────
-    const plans = await this.fetchAllPages<HwPlanRow>(
+    const plansPage = await this.fetchAllPages<HwPlanRow>(
       page,
       '/api/student/plan',
       'create_time,desc',
       pageSize,
     );
+    const plans = plansPage.rows;
+    if (!plansPage.complete) {
+      complete = false;
+      warnings.push('作业计划列表未取全（分页达到页数上限或返回页数不足 total）');
+    }
 
     // ── 2. 读取上传记录（补充上传时间/文件名/批阅状态）────────────────
     let uploads: HwUploadRow[] = [];
-    const warnings: string[] = [];
     try {
-      uploads = await this.fetchAllPages<HwUploadRow>(
+      const uploadsPage = await this.fetchAllPages<HwUploadRow>(
         page,
         '/api/student/homework',
         'uploadDate,desc',
         pageSize,
       );
+      uploads = uploadsPage.rows;
+      if (!uploadsPage.complete) {
+        complete = false;
+        warnings.push('已上传作业列表未取全（分页达到页数上限或返回页数不足 total）');
+      }
     } catch (err) {
-      // 上传列表失败不应让整体失败：plan 已足够给出作业与提交状态
+      // 上传列表失败不应让整体失败：plan 已足够给出作业与提交状态。
+      // 但必须把"没读到"如实透传出去（改造前这里收集的 warnings 会被丢弃）。
+      complete = false;
       warnings.push(
         `已上传作业列表读取失败：${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`,
       );
@@ -286,22 +303,26 @@ export class HwAssignmentSource implements AssignmentSource {
     }
 
     if (byPlanId.size === 0) {
-      // 两个接口都返回空：这是"确认没有作业"，交由上层处理为 empty
-      return [];
+      // 两个接口都返回空：这是"确认没有作业"（complete 仍须如实反映是否读全），
+      // 由上层据 complete 决定 empty 还是 failed。
+      return { items: [], complete, warnings };
     }
 
     const result: Assignment[] = [];
     for (const [planId, pair] of byPlanId) {
       const a = this.normalize(planId, pair.plan, pair.upload, lastSyncAt);
       if (a) result.push(a);
+      else warnings.push(`作业计划 ${planId} 标题为空，已跳过`);
     }
 
-    return result.sort((x, y) => {
+    result.sort((x, y) => {
       const xd = x.dueAt ? Date.parse(x.dueAt) : Number.MAX_SAFE_INTEGER;
       const yd = y.dueAt ? Date.parse(y.dueAt) : Number.MAX_SAFE_INTEGER;
       if (xd !== yd) return xd - yd;
       return x.title.localeCompare(y.title, 'zh-CN');
     });
+
+    return { items: result, complete, warnings };
   }
 
   async close(): Promise<void> {
@@ -386,16 +407,23 @@ export class HwAssignmentSource implements AssignmentSource {
     }
   }
 
-  /** 逐页读取直到取满 total 或返回空页（防止无限循环）。 */
+  /**
+   * 逐页读取直到取满 total 或返回空页（防止无限循环）。
+   *
+   * 返回值带 `complete`：`false` 表示「可能没读全」（撞到 maxPages 上限，
+   * 或最后一页仍满 pageSize 但 total 未知）。调用方必须据此降级，
+   * 不能把"没读全"当成"就这些"。
+   */
   private async fetchAllPages<T>(
     page: Awaited<ReturnType<BrowserSession['getPage']>>,
     path: string,
     sort: string,
     pageSize: number,
     maxPages = 20,
-  ): Promise<T[]> {
+  ): Promise<{ rows: T[]; complete: boolean }> {
     const out: T[] = [];
     let total = Infinity;
+    let exhausted = false;
 
     for (let pageNo = 0; pageNo < maxPages; pageNo++) {
       const params = new URLSearchParams({ size: String(pageSize), page: String(pageNo), sort });
@@ -404,13 +432,22 @@ export class HwAssignmentSource implements AssignmentSource {
         throw new Error(`平台返回 code=${env.code} msg=${env.msg ?? ''}`);
       }
       const rows = extractRows(env.data);
-      if (rows.length === 0) break;
-      out.push(...rows);
       if (typeof env.data?.total === 'number') total = env.data.total;
-      if (out.length >= total) break;
-      if (rows.length < pageSize) break;
+      if (rows.length === 0) {
+        exhausted = true;
+        break;
+      }
+      out.push(...rows);
+      if (out.length >= total) {
+        exhausted = true;
+        break;
+      }
+      if (rows.length < pageSize) {
+        exhausted = true;
+        break;
+      }
     }
-    return out;
+    return { rows: out, complete: exhausted };
   }
 
   /**
@@ -444,6 +481,7 @@ export class HwAssignmentSource implements AssignmentSource {
     const detailUrl = `${ORIGIN}/student/homeworkPlan`;
 
     return {
+      kind: 'homework',
       source: SOURCE,
       sourceAssignmentId: String(planId),
       id: assignmentId(SOURCE, String(planId)),

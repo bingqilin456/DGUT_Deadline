@@ -58,10 +58,16 @@
 | 只有日期无时间时不得补 23:59 | `datetime.test.ts` |
 | 无截止时间必须 `dueAt=null, duePrecision='none'` | `datetime.test.ts` |
 | 未提交/未知状态严格区分 | `hw-source.test.ts` |
-| 失败不得清空缓存 | `sync-engine` 设计 + 待补测试 |
+| 失败不得清空缓存 | `sync-engine.test.ts`（含按 kind 隔离的用例） |
 | 跳转链接必须过 allowlist | `normalize.test.ts` |
 | hw 的 `deadline` 是布尔、`deadlineDate` 才是时间 | `hw-source.test.ts` |
-| 提醒键包含 dueAt，改期后旧键失效 | `planner` 设计 + 待补测试 |
+| 提醒键包含锚点时间，改期后旧键失效 | `planner.test.ts` + `exam-planner.test.ts` |
+| **考试没有任何「提交状态」**（类型层不可写） | `ExamItem` 无 `submissionStatus` 字段；`item-view.test.ts` 断言 UI 不出现「未参加」 |
+| **作业键与考试键不得互相匹配** | `exam-planner.test.ts`「关键」用例 |
+| **考试按 `endsAt` 判过期**，进行中不得被默认隐藏 | `filter.test.ts` + `item-view.test.ts` |
+| **考试失败不得影响作业缓存**，反之亦然 | `sync-engine.test.ts` + `app-store.migration.test.ts` |
+| **v2 缓存迁移后一条不少且补 `kind='homework'`** | `app-store.migration.test.ts` + `app-store.realdata.test.ts` |
+| **分类按接口来源，不按标题** | 无标题正则（代码中 grep 不到） |
 
 ## 6. 开发命令
 
@@ -80,10 +86,18 @@ npm run build:win    # 打 NSIS 安装包
 node scripts/smoke.mjs        # 无头启动验证（检查主进程/渲染进程无致命错误）
 node scripts/ui-shot.mjs      # 截图主窗口
 node scripts/e2e-ui.mjs       # 用真实采集数据渲染并断言 UI
+node scripts/exam-e2e.mjs     # 考试接入端到端（合成夹具，验证接线非接口真实性）
+node scripts/probe-lms-exam.mjs  # 只读探针：拿考试列表真实响应形状（需登录态）
 ```
 
 > ⚠️ 本机 shell 存在 `NODE_OPTIONS=--require worker-events.cjs`，会污染 Electron 启动。
 > 脚本中已显式置空 `NODE_OPTIONS`。
+>
+> ⚠️ **另一个坑**：本机还带有 `ELECTRON_RUN_AS_NODE=1`。只要该变量存在（哪怕值为空串），
+> Electron 就会以纯 Node 模式运行，于是 `import { BrowserWindow } from 'electron'`
+> 直接抛 `does not provide an export named 'BrowserWindow'` —— 看起来像代码缺陷，
+> 实际是环境污染。启动 Electron 的脚本必须 **`delete env.ELECTRON_RUN_AS_NODE`**（删除键，
+> 不是设为 `''`）。
 
 ## 7. 修改适配器时必须做的事
 
@@ -94,8 +108,37 @@ node scripts/e2e-ui.mjs       # 用真实采集数据渲染并断言 UI
 
 ## 8. 当前状态（务必与代码同步更新）
 
-- ✅ hw 平台：真实登录后读取到 14 条作业，归一化全部正确（10 已提交 / 4 未提交 / 0 未知）。
-- ❌ 优学院 LMS：作业接口未拿到。已定位其作业子系统为独立域名 `homework.dgut.edu.cn`，
-  对外访问被网关 302 到 404 页；且当前受控浏览器中 LMS `AUTHORIZATION` cookie 缺失（未登录）。
+### 平台认知（2026-11-11 实测纠正，**旧文档此处曾有错**）
+
+DGUT 优学院是**单主机 + 路径前缀**，不是「一子系统一子域」：
+
+- 唯一主机：`https://lms.dgut.edu.cn`
+- 子系统按路径分发：`/courseweb/`（前端）、`/courseapi/`（旧 API）、`/utest/`（新考试前端）、
+  `/utestapi/`（新考试 API）、`/homework/`（作业前端）—— 实测全部 **200**
+- `homework.dgut.edu.cn` / `courseapi.dgut.edu.cn` / `utestapi.dgut.edu.cn` / `utest.dgut.edu.cn`
+  实测一律 **302 → `nic.dgut.edu.cn/ymwzd404.htm`**（不存在）
+- 根因：打开页面即下发**非凭证**路由 cookie `urlStyle=2` + `baseHost=lms.dgut.edu.cn`，
+  `config.js` 据此把 host 改写为 `baseHost + "/<prefix>"`
+- ⇒ 所有 `detailUrl` 都在 `lms.dgut.edu.cn` 下，`SOURCE_ALLOWLIST` **无需新增域名**
+
+### 数据接入
+
+- ✅ hw 平台：真实登录后读取作业，归一化正确（已验证 14 / 20 条两个批次）
+- ✅ 优学院 LMS **作业**：`/courseapi/homeworks/student/v2?ocId=`，真实读取 121 条
+- 🟡 优学院 LMS **考试**：接口与归一化代码已完成，但**真实响应从未拿到**
+  （会话 `needs_login`，`/courseapi|utestapi/exams/student` 均 401 `{code:2001}`）。
+  `settings.examSyncEnabled` **默认开启**（用户 2026-11-11 决策），因此同步时会真实请求考试接口；
+  适配器对「容器识别不了 / 会话失效」必须抛错 → 归类为 `failed` → UI 显示「考试同步失败」，
+  **绝不返回空数组**伪装成"没有考试"。用户可在设置里关闭。
+  证据见 `investigation/lms/exam-evidence.md`，计划见 `docs/LMS-EXAM-PLAN.md`。
+  拿到真实响应后跑 `node scripts/probe-lms-exam.mjs --profile <profile副本>` 定字段。
 - ⏳ 提醒引擎、托盘、系统通知：代码骨架已就绪，**尚未做实机验证**。
 - ⏳ NSIS 安装包：**尚未制作**。
+
+### 作业 / 考试的分类口径（用户 2026-11-11 决策）
+
+> 「在作业模块出现的不管叫什么都算作作业 tab，在考试模块出现的不管叫什么都算作考试 tab。」
+
+⇒ `kind` 由**接口来源**决定，**不由标题内容决定**。
+叫「期末考试」但来自作业接口的条目就是 `kind='homework'`，继续用作业模型与作业文案。
+**禁止**按标题正则（`期末|期中|测验|考试`）推断条目性质。

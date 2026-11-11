@@ -2,12 +2,13 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import type { AppSnapshot, UiAssignment } from '../../shared/ipc';
 import type { SourceId } from '@dgut-deadline/shared';
-import { formatRemaining, dueToMs } from '@dgut-deadline/shared';
+import { dueToMs } from '@dgut-deadline/shared';
 import AssignmentTable from './components/AssignmentTable.vue';
 import FilterBar from './components/FilterBar.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import SourceStatus from './components/SourceStatus.vue';
-import { DEFAULT_FILTER, applyFilter, isExpired, type FilterState } from './logic/filter';
+import { DEFAULT_FILTER, applyFilter, type FilterState } from './logic/filter';
+import { examPhase } from './logic/item-view';
 
 const snap = ref<AppSnapshot | null>(null);
 const loading = ref(true);
@@ -94,15 +95,41 @@ async function testNotification(): Promise<void> {
 const stats = computed(() => {
   const list = snap.value?.assignments ?? [];
   const now = nowMs.value;
-  const unsubmitted = list.filter((a) => a.submissionStatus === 'not_submitted' || a.submissionStatus === 'unknown');
+
+  // 作业卡：只统计 kind==='homework'（考试没有提交状态，混进来会误计）。
+  const unsubmitted = list.filter(
+    (a) => a.kind === 'homework' && (a.submissionStatus === 'not_submitted' || a.submissionStatus === 'unknown'),
+  );
   const dueSoon = unsubmitted.filter((a) => {
+    if (a.kind !== 'homework') return false;
     const d = dueToMs(a.dueAt);
     if (d === null) return false;
     const diff = d - now;
     return diff > 0 && diff <= 72 * 3600 * 1000;
   });
-  const submitted = list.filter((a) => a.submissionStatus === 'submitted');
-  return { unsubmitted: unsubmitted.length, dueSoon: dueSoon.length, submitted: submitted.length };
+  const submitted = list.filter((a) => a.kind === 'homework' && a.submissionStatus === 'submitted');
+
+  // 考试卡：7 天内开考 + 进行中（由本地时间推导，不依赖未验证的 examState）。
+  const exams = list.filter((a) => a.kind === 'exam');
+  const examsSoon = exams.filter((a) => {
+    if (a.kind !== 'exam') return false;
+    const phase = examPhase(a, now);
+    if (phase === 'ongoing') return true;
+    if (phase !== 'upcoming') return false;
+    const s = dueToMs(a.startsAt);
+    if (s === null) return false;
+    return s - now <= 7 * 24 * 3600 * 1000;
+  });
+  const examsOngoing = exams.filter((a) => a.kind === 'exam' && examPhase(a, now) === 'ongoing');
+
+  return {
+    unsubmitted: unsubmitted.length,
+    dueSoon: dueSoon.length,
+    submitted: submitted.length,
+    examCount: exams.length,
+    examsSoon: examsSoon.length,
+    examsOngoing: examsOngoing.length,
+  };
 });
 
 const lastSyncText = computed(() => {
@@ -202,12 +229,12 @@ onUnmounted(() => {
 
         <template v-if="tab === 'list'">
           <div class="section-heading">
-            <h1>作业概览</h1>
-            <span>关注未完成与临近截止的作业</span>
+            <h1>任务概览</h1>
+            <span>作业按截止时间、考试按开考时间统一排序</span>
           </div>
-          <div class="stats">
+          <div class="stats stats-4">
             <div class="stat pending">
-              <div class="label">未完成</div>
+              <div class="label">未完成作业</div>
               <div class="num">{{ stats.unsubmitted }}</div>
               <span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6m-6 4h6m-6 4h3"/></svg></span>
             </div>
@@ -216,8 +243,13 @@ onUnmounted(() => {
               <div class="num">{{ stats.dueSoon }}</div>
               <span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
             </div>
+            <div class="stat exam">
+              <div class="label">7 天内开考 / 进行中</div>
+              <div class="num">{{ stats.examsSoon }}</div>
+              <span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/><path d="m15 15 2 2 3-3"/></svg></span>
+            </div>
             <div class="stat ok">
-              <div class="label">已完成</div>
+              <div class="label">已完成作业</div>
               <div class="num">{{ stats.submitted }}</div>
               <span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg></span>
             </div>
@@ -242,11 +274,12 @@ onUnmounted(() => {
           />
           <div v-else-if="snap.assignments.length" class="table-wrap">
             <div class="empty">
-              <div class="big">当前筛选条件下没有作业</div>
+              <div class="big">当前筛选条件下没有作业或考试</div>
               <div>
-                共 {{ snap.assignments.length }} 条作业，被筛选条件排除了。
+                共 {{ snap.assignments.length }} 条（{{ stats.unsubmitted + stats.submitted }} 条作业、
+                {{ stats.examCount }} 场考试），被筛选条件排除了。
                 <br />
-                点上方「重置筛选」可恢复默认视图（只看未截止）。
+                点上方「重置筛选」可恢复默认视图（只看未过期）。
               </div>
             </div>
           </div>
@@ -256,7 +289,9 @@ onUnmounted(() => {
               <div>
                 请先在上方完成平台登录并点击「立即同步」。
                 <br />
-                若同步失败，本应用不会把失败显示成"没有作业"。
+                若同步失败，本应用不会把失败显示成"没有作业/没有考试"。
+                <br />
+                考试同步默认关闭（接口未用真实响应验证），可在设置中开启。
               </div>
             </div>
           </div>

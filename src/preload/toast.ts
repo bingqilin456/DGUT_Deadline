@@ -3,18 +3,9 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron';
+import type { ToastApi, ToastItem } from '../shared/toast.js';
 
-interface ToastItem {
-  key: string;
-  title: string;
-  body: string;
-  urgent: boolean;
-  detailUrl: string | null;
-  courseName: string | null;
-  assignmentTitle: string;
-  thresholdHours: number;
-}
-
+// 类型单一来源：src/shared/toast.ts（主进程、preload、渲染进程三方共用）。
 contextBridge.exposeInMainWorld('toastApi', {
   onItems: (cb: (items: ToastItem[]) => void) => {
     ipcRenderer.on('toast:items', (_e, items: ToastItem[]) => cb(items));
@@ -28,4 +19,4 @@ contextBridge.exposeInMainWorld('toastApi', {
   notifyReady: () => {
     ipcRenderer.send('toast:ready');
   },
-});
+} satisfies ToastApi);

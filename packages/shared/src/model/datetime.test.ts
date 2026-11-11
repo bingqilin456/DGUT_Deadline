@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DISPLAY_TZ_OFFSET, formatRemaining, parseDueAt } from '../model/datetime.js';
+import { DISPLAY_TZ_OFFSET, formatRemaining, parseDueAt, parseExamTime } from '../model/datetime.js';
 
 describe('parseDueAt —— 日期归一化', () => {
   it('解析 yyyy-MM-dd HH:mm 为带 +08:00 的时间点', () => {
@@ -127,5 +127,87 @@ describe('formatRemaining —— 剩余时间文案', () => {
   it('只有日期精度时明确标注', () => {
     const due = Date.parse(`2026-11-10T00:00:00${DISPLAY_TZ_OFFSET}`);
     expect(formatRemaining(now, due, 'date')).toContain('（仅日期）');
+  });
+});
+
+describe('parseExamTime —— 考试时间归一化（双格式探测，失败即 null）', () => {
+  // ⚠️ 这些用例只验证**归一化函数本身**的行为；
+  // 考试接口真实返回的时间类型未验证（证据表 C.6），不据此断言平台形状。
+  it('毫秒时间戳（>1e12）按毫秒解析为 +08:00', () => {
+    // 1798646400000 = 2026-12-30T16:00:00Z = 2026-12-31T00:00:00+08:00
+    expect(parseExamTime(1798646400000)).toEqual({
+      iso: `2026-12-31T00:00:00${DISPLAY_TZ_OFFSET}`,
+      precision: 'datetime',
+    });
+  });
+
+  it('秒级时间戳（1e9~1e12）保守按秒解析', () => {
+    expect(parseExamTime(1798646400)).toEqual({
+      iso: `2026-12-31T00:00:00${DISPLAY_TZ_OFFSET}`,
+      precision: 'datetime',
+    });
+  });
+
+  it('纯数字字符串按数值处理', () => {
+    expect(parseExamTime('1798646400000')).toEqual({
+      iso: `2026-12-31T00:00:00${DISPLAY_TZ_OFFSET}`,
+      precision: 'datetime',
+    });
+  });
+
+  it('ISO 带偏移字符串复用 parseDueAt', () => {
+    expect(parseExamTime('2026-12-30T09:00:00+08:00')).toEqual({
+      iso: `2026-12-30T09:00:00${DISPLAY_TZ_OFFSET}`,
+      precision: 'datetime',
+    });
+  });
+
+  it('UTC ISO 换算到 +08:00', () => {
+    expect(parseExamTime('2026-12-30T01:00:00Z')).toEqual({
+      iso: `2026-12-30T09:00:00${DISPLAY_TZ_OFFSET}`,
+      precision: 'datetime',
+    });
+  });
+
+  it('"YYYY-MM-DD HH:mm" 平台文本格式', () => {
+    expect(parseExamTime('2026-12-30 09:00')).toEqual({
+      iso: `2026-12-30T09:00:00${DISPLAY_TZ_OFFSET}`,
+      precision: 'datetime',
+    });
+  });
+
+  it('【关键】只有日期 => null（考试没有"只有日期"语义，不补 00:00）', () => {
+    expect(parseExamTime('2026-12-30')).toBeNull();
+    expect(parseExamTime('2026年12月30日')).toBeNull();
+  });
+
+  it('空值 / null / undefined => null', () => {
+    expect(parseExamTime('')).toBeNull();
+    expect(parseExamTime('   ')).toBeNull();
+    expect(parseExamTime(null)).toBeNull();
+    expect(parseExamTime(undefined)).toBeNull();
+  });
+
+  it('0 / 负数 / NaN / Infinity => null（绝不产生 1970 伪值）', () => {
+    expect(parseExamTime(0)).toBeNull();
+    expect(parseExamTime(-1)).toBeNull();
+    expect(parseExamTime(Number.NaN)).toBeNull();
+    expect(parseExamTime(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(parseExamTime('0')).toBeNull();
+  });
+
+  it('小于 1e9 的数字（不是合理时间戳）=> null，不按秒猜', () => {
+    expect(parseExamTime(12345)).toBeNull();
+  });
+
+  it('无法识别的自由文本 => null', () => {
+    expect(parseExamTime('另行通知')).toBeNull();
+    expect(parseExamTime('未设置')).toBeNull();
+  });
+
+  it('对象/布尔等非时间类型 => null', () => {
+    expect(parseExamTime({})).toBeNull();
+    expect(parseExamTime(true)).toBeNull();
+    expect(parseExamTime([])).toBeNull();
   });
 });

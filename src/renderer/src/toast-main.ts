@@ -2,17 +2,9 @@
  * 右下角提醒弹窗的渲染逻辑（原生 DOM，不依赖 Vue，启动更快）。
  */
 
-interface ToastItem {
-  key: string;
-  title: string;
-  body: string;
-  urgent: boolean;
-  detailUrl: string | null;
-  courseName: string | null;
-  assignmentTitle: string;
-  thresholdHours: number;
-}
+import type { ToastItem } from '../../shared/toast';
 
+// 类型单一来源：src/shared/toast.ts，不再手抄一份影子结构。
 interface ToastApi {
   onItems(cb: (items: ToastItem[]) => void): void;
   acknowledge(keys: string[]): void;

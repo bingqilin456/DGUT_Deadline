@@ -1,25 +1,45 @@
 /**
- * 作业列表的筛选与排序（纯逻辑，可单测）。
+ * 列表的筛选与排序（纯逻辑，可单测）。
  *
  * 产品要求（用户明确指定）：
- *  - 可按「平台 / 课程 / 截止时间 / 剩余 / 状态」筛选
- *  - **默认只看未截止**，且**截止时间最近的排最前**
+ *  - 可按「类型 / 平台 / 课程 / 时间 / 剩余 / 状态」筛选
+ *  - **默认只看未过期**，且**时间最近的排最前**
+ *
+ * 类型（kind）维度（用户 2026-11-11 决策）：
+ *  - 分类依据 = **接口来源模块**，不是标题内容。
+ *    叫「期末考试」但来自作业接口的条目就是作业；叫「第 3 次作业」但来自考试接口的条目就是考试。
+ *    ⇒ 本文件**不得**出现任何按标题关键词猜测性质的逻辑。
+ *  - 「全部」= 混排（按统一锚点排序，带类型徽标）；「作业」「考试」= 仅作筛选。
+ *
+ * 两种实体的时间语义不同，统一用共享模型的助手收窄：
+ *  - 锚点 anchorOf()：作业 = dueAt（截止），考试 = startsAt（开考）
+ *  - 结束 endOf()：作业 = dueAt，考试 = endsAt ?? startsAt
+ * 详见 packages/shared/src/model/assignment.ts。
  */
 
 import type { UiAssignment } from '../../../shared/ipc';
-import { dueToMs } from '@dgut-deadline/shared';
+import { anchorOf, dueToMs, endOf, isExamItem } from '@dgut-deadline/shared';
 
-/** 截止时间范围选项。 */
+/** 类型筛选（用户 2026-11-11 决策 D2 = A+B 合并）。 */
+export type KindFilter = 'all' | 'homework' | 'exam';
+
+/** 时间范围选项。作业按「截止」，考试按「开考」（统一用锚点实现）。 */
 export type DueRange =
   | 'all' // 不限
-  | 'overdue' // 已截止
+  | 'overdue' // 已过期（作业=已截止 / 考试=已结束）
   | 'today' // 今天内（24h）
   | '3d' // 3 天内
   | '7d' // 7 天内
   | '30d' // 30 天内
-  | 'unknown'; // 截止时间未知
+  | 'unknown'; // 时间未知
 
-/** 提交状态筛选。 */
+/**
+ * 提交状态筛选。
+ *
+ * ⚠️ 这是**作业专有**语义。考试没有「提交状态」（`UiExam` 上物理不存在该字段），
+ * 因此 `not_submitted` / `submitted` 对考试行**不匹配任何行**（不是"全部匹配"）。
+ * 考试行只有 `unknown`（参加状态恒未知，平台未提供可信字段）与 `overdue`（已结束）有意义。
+ */
 export type StatusFilter =
   | 'all'
   | 'not_submitted'
@@ -31,17 +51,19 @@ export type StatusFilter =
 export type RemainRange = 'all' | '3h' | '24h' | '72h' | '7d' | 'none';
 
 export interface FilterState {
+  /** 类型：全部 / 作业 / 考试。 */
+  kind: KindFilter;
   /** 平台：'all' 或具体 SourceId。 */
   source: 'all' | 'hw' | 'ulearning';
   /** 课程：'all' 或具体课程名。 */
   course: string;
-  /** 截止时间范围。默认 'upcoming' 语义由 hideExpired 控制。 */
+  /** 时间范围。默认由 hideExpired 控制。 */
   dueRange: DueRange;
   /** 剩余时间范围。 */
   remainRange: RemainRange;
-  /** 状态。 */
+  /** 状态（作业专有，考试只认 unknown/overdue）。 */
   status: StatusFilter;
-  /** 是否隐藏已截止（默认 true —— 用户要求默认只看未截止）。 */
+  /** 是否隐藏已过期（默认 true —— 用户要求默认只看未过期）。 */
   hideExpired: boolean;
   /** 标题/课程关键字搜索。 */
   keyword: string;
@@ -50,23 +72,32 @@ export interface FilterState {
 }
 
 export const DEFAULT_FILTER: FilterState = {
+  kind: 'all', // 默认混排：一个列表看全「今天要做什么」
   source: 'all',
   course: 'all',
   dueRange: 'all',
   remainRange: 'all',
   status: 'all',
-  hideExpired: true, // 用户要求：默认只看未截止
+  hideExpired: true, // 用户要求：默认只看未过期
   keyword: '',
-  sort: 'dueAsc', // 用户要求：截止时间最近的排最前
+  sort: 'dueAsc', // 用户要求：时间最近的排最前
 };
 
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
 
-/** 判断是否已截止（无截止时间不算已截止）。 */
-export function isExpired(a: UiAssignment, nowMs: number): boolean {
-  const d = dueToMs(a.dueAt);
-  return d !== null && d < nowMs;
+/**
+ * 判断是否已过期。
+ *
+ * 作业：`dueAt < now`（与改造前完全一致）。
+ * 考试：用 `endsAt`（缺失时退化用 `startsAt`）判定 —— **已开考未结束的考试不算过期**。
+ *   这是产品级红线（docs/LMS-EXAM-PLAN.md §5.1/§8.5）：把开考时间当截止时间会让
+ *   「正在考试」的条目被默认的「隐藏已过期」过滤掉，用户正在考试列表里反而没了。
+ *   时间未知（两者都 null）不算过期 —— 不能假装它已结束。
+ */
+export function isExpired(item: UiAssignment, nowMs: number): boolean {
+  const end = dueToMs(endOf(item));
+  return end !== null && end < nowMs;
 }
 
 /** 应用筛选。 */
@@ -78,13 +109,16 @@ export function applyFilter(
   const kw = f.keyword.trim().toLowerCase();
 
   const out = list.filter((a) => {
+    // 类型（先判，最省）
+    if (f.kind !== 'all' && a.kind !== f.kind) return false;
+
     // 平台
     if (f.source !== 'all' && a.source !== f.source) return false;
 
     // 课程
     if (f.course !== 'all' && (a.courseName ?? '') !== f.course) return false;
 
-    // 默认隐藏已截止
+    // 默认隐藏已过期
     if (f.hideExpired && isExpired(a, nowMs)) return false;
 
     // 关键字（标题 + 课程）
@@ -93,39 +127,44 @@ export function applyFilter(
       if (!hay.includes(kw)) return false;
     }
 
-    // 状态
+    // 状态（作业专有语义，考试按 §8.4 分支）
     if (f.status !== 'all') {
       if (f.status === 'overdue') {
         if (!isExpired(a, nowMs)) return false;
+      } else if (isExamItem(a)) {
+        // 考试没有提交状态：submitted / not_submitted 不匹配任何考试行；
+        // unknown = 参加状态未知（一期恒为 unknown，平台未提供可信字段）。
+        if (f.status !== 'unknown') return false;
       } else if (a.submissionStatus !== f.status) {
         return false;
       }
     }
 
-    const d = dueToMs(a.dueAt);
+    // 统一锚点：作业 = 截止时间；考试 = 开考时间。
+    const anchor = dueToMs(anchorOf(a));
 
-    // 截止时间范围
+    // 时间范围
     if (f.dueRange !== 'all') {
       if (f.dueRange === 'unknown') {
-        if (d !== null) return false;
+        if (anchor !== null) return false;
       } else if (f.dueRange === 'overdue') {
-        if (d === null || d >= nowMs) return false;
+        if (!isExpired(a, nowMs)) return false;
       } else {
-        if (d === null) return false;
-        const diff = d - nowMs;
+        if (anchor === null) return false;
+        const diff = anchor - nowMs;
         const limit =
           f.dueRange === 'today' ? DAY : f.dueRange === '3d' ? 3 * DAY : f.dueRange === '7d' ? 7 * DAY : 30 * DAY;
         if (diff < 0 || diff > limit) return false;
       }
     }
 
-    // 剩余时间范围
+    // 剩余时间范围（相对锚点）
     if (f.remainRange !== 'all') {
       if (f.remainRange === 'none') {
-        if (d !== null) return false;
+        if (anchor !== null) return false;
       } else {
-        if (d === null) return false;
-        const diff = d - nowMs;
+        if (anchor === null) return false;
+        const diff = anchor - nowMs;
         if (diff < 0) return false;
         const limit =
           f.remainRange === '3h'
@@ -145,7 +184,7 @@ export function applyFilter(
   return sortList(out, f.sort, nowMs);
 }
 
-/** 排序。 */
+/** 排序。统一用 anchorOf()（作业=dueAt / 考试=startsAt），无锚点置底。 */
 export function sortList(
   list: readonly UiAssignment[],
   sort: FilterState['sort'],
@@ -153,38 +192,38 @@ export function sortList(
 ): UiAssignment[] {
   void nowMs;
   const arr = [...list];
-  const due = (a: UiAssignment): number => {
-    const d = dueToMs(a.dueAt);
+  const anchor = (a: UiAssignment): number => {
+    const d = dueToMs(anchorOf(a));
     return d === null ? Number.MAX_SAFE_INTEGER : d;
   };
 
   switch (sort) {
     case 'dueAsc':
-      // 截止最近的在前；无截止时间的置底
+      // 时间最近的在前；无锚点的置底
       arr.sort((x, y) => {
-        const dx = due(x);
-        const dy = due(y);
+        const dx = anchor(x);
+        const dy = anchor(y);
         if (dx !== dy) return dx - dy;
         return x.title.localeCompare(y.title, 'zh-CN');
       });
       break;
     case 'dueDesc':
       arr.sort((x, y) => {
-        const dx = due(x);
-        const dy = due(y);
+        const dx = anchor(x);
+        const dy = anchor(y);
         if (dx !== dy) return dy - dx;
         return x.title.localeCompare(y.title, 'zh-CN');
       });
       break;
     case 'remaining':
-      // 与 dueAsc 同向，但无截止时间的明确置底
-      arr.sort((x, y) => due(x) - due(y));
+      // 与 dueAsc 同向，但无锚点的明确置底
+      arr.sort((x, y) => anchor(x) - anchor(y));
       break;
     case 'course':
       arr.sort((x, y) => {
         const c = (x.courseName ?? '').localeCompare(y.courseName ?? '', 'zh-CN');
         if (c !== 0) return c;
-        return due(x) - due(y);
+        return anchor(x) - anchor(y);
       });
       break;
   }
@@ -204,10 +243,17 @@ export function collectCourses(list: readonly UiAssignment[]): string[] {
 /** 统计各筛选项的数量，用于在 UI 上显示计数。 */
 export interface FilterCounts {
   all: number;
+  /** 未过期条数（作业=未截止 / 考试=未结束）。 */
   upcoming: number;
+  /** 已过期条数。 */
   overdue: number;
+  /** 已提交作业数（考试无此概念，不计入）。 */
   submitted: number;
+  /** 未提交作业数（考试无此概念，不计入）。 */
   notSubmitted: number;
+  /** 按类型的计数（类型 Tab 上的数字）。 */
+  homework: number;
+  exam: number;
 }
 
 export function countBy(list: readonly UiAssignment[], nowMs: number): FilterCounts {
@@ -215,11 +261,19 @@ export function countBy(list: readonly UiAssignment[], nowMs: number): FilterCou
   let overdue = 0;
   let submitted = 0;
   let notSubmitted = 0;
+  let homework = 0;
+  let exam = 0;
   for (const a of list) {
     if (isExpired(a, nowMs)) overdue++;
     else upcoming++;
+    if (isExamItem(a)) {
+      exam++;
+      // 考试没有提交状态：不参与 submitted / notSubmitted 统计。
+      continue;
+    }
+    homework++;
     if (a.submissionStatus === 'submitted') submitted++;
     if (a.submissionStatus === 'not_submitted') notSubmitted++;
   }
-  return { all: list.length, upcoming, overdue, submitted, notSubmitted };
+  return { all: list.length, upcoming, overdue, submitted, notSubmitted, homework, exam };
 }

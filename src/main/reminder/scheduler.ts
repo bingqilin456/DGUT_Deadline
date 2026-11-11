@@ -15,7 +15,7 @@
  */
 
 import { Notification, shell } from 'electron';
-import type { Assignment, SourceId } from '@dgut-deadline/shared';
+import type { ListItem, SourceId } from '@dgut-deadline/shared';
 import { isAllowedDetailUrl } from '@dgut-deadline/shared';
 import type { AppStore } from '../store/app-store.js';
 import { isInQuietHours, planReminders, reminderText, type PlannedReminder } from './planner.js';
@@ -98,14 +98,16 @@ export class ReminderScheduler {
   private dispatch(): DispatchResult {
     const settings = this.store.getSettings();
     const nowMs = this.now();
-    const assignments = this.store.getAllAssignments();
+    // 作业 + 考试一起参与提醒（考试只在其同步开关打开时才有缓存数据）
+    const items = this.store.getAllListItems();
     const firedKeys = new Set(this.store.getReminders().map((r) => r.key));
 
     const inQuiet = isInQuietHours(nowMs, settings.quietHours);
 
-    const planned = planReminders(assignments, {
+    const planned = planReminders(items, {
       nowMs,
       thresholdsHours: settings.thresholds,
+      examThresholds: settings.examThresholds,
       notifyUnknownStatus: settings.notifyUnknownStatus,
       firedKeys,
       quietHours: settings.quietHours,
@@ -145,7 +147,7 @@ export class ReminderScheduler {
     if (this.toasts && !usingRealNotifications) {
       // 测试注入模式：走注入的回调
       for (const r of toSend) {
-        const ok = this.show(r, assignments);
+        const ok = this.show(r, items);
         if (ok) {
           this.record(r);
           result.fired++;
@@ -167,7 +169,7 @@ export class ReminderScheduler {
 
     // 降级：系统通知
     for (const r of toSend) {
-      const ok = this.show(r, assignments);
+      const ok = this.show(r, items);
       if (ok) {
         this.record(r);
         result.fired++;
@@ -187,9 +189,9 @@ export class ReminderScheduler {
     });
   }
 
-  private show(r: PlannedReminder, assignments: readonly Assignment[]): boolean {
+  private show(r: PlannedReminder, items: readonly ListItem[]): boolean {
     const text = reminderText(r);
-    const assignment = assignments.find((a) => a.id === r.assignmentId);
+    const item = items.find((a) => a.id === r.assignmentId);
 
     if (this.opts.showNotification) {
       return this.opts.showNotification(text);
@@ -205,8 +207,8 @@ export class ReminderScheduler {
       n.on('click', () => {
         this.opts.onActivate?.();
         // 点击后打开源站（已过 allowlist 校验），不携带任何 token
-        if (assignment && isAllowedDetailUrl(assignment.source, assignment.detailUrl)) {
-          void shell.openExternal(assignment.detailUrl!);
+        if (item && isAllowedDetailUrl(item.source, item.detailUrl)) {
+          void shell.openExternal(item.detailUrl!);
         }
       });
 
@@ -230,9 +232,10 @@ export class ReminderScheduler {
     const settings = this.store.getSettings();
     const nowMs = this.now();
     const firedKeys = new Set(this.store.getReminders().map((r) => r.key));
-    return planReminders(this.store.getAllAssignments(), {
+    return planReminders(this.store.getAllListItems(), {
       nowMs,
       thresholdsHours: settings.thresholds,
+      examThresholds: settings.examThresholds,
       notifyUnknownStatus: settings.notifyUnknownStatus,
       firedKeys,
       quietHours: settings.quietHours,

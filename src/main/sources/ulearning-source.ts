@@ -44,16 +44,24 @@
  *     并在 statusEvidence 中记录原始值。
  */
 
-import type { Assignment, SourceId, SessionStatus } from '@dgut-deadline/shared';
+import type { Assignment, ExamItem, SourceId, SessionStatus } from '@dgut-deadline/shared';
 import {
   assignmentId,
   isAllowedDetailUrl,
   parseDueAt,
   type AssignmentSource,
+  type ListItemsResult,
   type ListOptions,
 } from '@dgut-deadline/shared';
 import { BrowserSession, detectEdge } from '../browser/session.js';
 import { RateLimiter } from './rate-limit.js';
+import {
+  LmsExamParseError,
+  LmsExamSessionExpiredError,
+  extractExamRows,
+  normalizeExamItems,
+  type LmsExamRow,
+} from './lms-exam.js';
 
 const SOURCE: SourceId = 'ulearning';
 const BASE = 'https://lms.dgut.edu.cn';
@@ -99,6 +107,8 @@ export interface LmsHomeworkRow {
 export class UlearningAssignmentSource implements AssignmentSource {
   readonly source = SOURCE;
   readonly displayName = '优学院 LMS';
+  /** 作业来自「作业」模块，考试来自「考试」模块（两个独立菜单，见 docs/LMS-EXAM-PLAN.md §4.7）。 */
+  readonly supportedKinds = ['homework', 'exam'] as const;
 
   private readonly session: BrowserSession;
   private readonly limiter = new RateLimiter();
@@ -316,9 +326,10 @@ export class UlearningAssignmentSource implements AssignmentSource {
    * 读取全部课程的作业。
    *
    * 流程：先取课程列表 → 逐门课取作业 → 归一化。
-   * 单门课失败不影响其它课程（记录到 evidence）。
+   * 单门课失败不影响其它课程，但**必须**通过 `complete=false` + `warnings` 表达，
+   * 不能把"没读到"当成"没有作业"。
    */
-  async listAssignments(options: ListOptions = {}): Promise<Assignment[]> {
+  async listAssignments(options: ListOptions = {}): Promise<ListItemsResult<Assignment>> {
     const timeoutMs = options.timeoutMs ?? 120_000;
     const page = await this.session.getPage(HOST);
     page.setDefaultTimeout(timeoutMs);
@@ -335,22 +346,132 @@ export class UlearningAssignmentSource implements AssignmentSource {
 
     const lastSyncAt = new Date().toISOString();
     const out: Assignment[] = [];
+    const warnings: string[] = [];
     const maxCourses = options.maxCourses ?? 40;
+    let complete = true;
 
     for (const course of courses.slice(0, maxCourses)) {
-      const rows = await this.listCourseHomeworks(page, course.id);
+      let rows: LmsHomeworkRow[];
+      try {
+        rows = await this.listCourseHomeworks(page, course.id);
+      } catch (err) {
+        // 单门课失败 ⇒ 降级但不整体失败（保留其它课程结果），同时如实标记 complete=false。
+        complete = false;
+        warnings.push(
+          `课程「${course.name ?? course.id}」作业读取失败：${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`,
+        );
+        continue;
+      }
       for (const row of rows) {
         const a = this.normalizeHomework(course, row, lastSyncAt);
         if (a) out.push(a);
+        else warnings.push(`课程「${course.name ?? course.id}」有作业标题为空，已跳过`);
       }
     }
 
-    return out.sort((x, y) => {
+    if (courses.length > maxCourses) {
+      complete = false;
+      warnings.push(`课程数量 ${courses.length} 超过单次上限 ${maxCourses}，已截断`);
+    }
+
+    out.sort((x, y) => {
       const xd = x.dueAt ? Date.parse(x.dueAt) : Number.MAX_SAFE_INTEGER;
       const yd = y.dueAt ? Date.parse(y.dueAt) : Number.MAX_SAFE_INTEGER;
       if (xd !== yd) return xd - yd;
       return x.title.localeCompare(y.title, 'zh-CN');
     });
+
+    return { items: out, complete, warnings };
+  }
+
+  /**
+   * 读取考试**场次**列表（docs/LMS-EXAM-PLAN.md §6.4）。
+   *
+   * ═══════════════════════════════════════════════════════════════════
+   * ⚠️ 整段未验证：真实考试列表响应从未拿到（2026-11-10 复核 LMS 会话 needs_login，
+   * 两条候选接口均 401 `{code:2001}`）。字段名全部来自前端 bundle 静态阅读
+   * （investigation/lms/exam-evidence.md §B）。调用方默认关闭（examSyncEnabled=false）。
+   * ═══════════════════════════════════════════════════════════════════
+   *
+   * 策略（对齐 §6.4，刻意不先判 `hasMenu(54)` —— 其响应形状未验证 C.4）：
+   *   1. 先打新分支 `/utestapi/exams/student`；
+   *   2. 404 / 非 JSON / 业务码表明"无此接口" ⇒ 回退旧分支 `/courseapi/exams/student`；
+   *   3. 401/403 或业务码 2001/2101/2201 ⇒ **抛错**（会话失效，不逐课程重试）；
+   *   4. 两条都失败 ⇒ 该课程计 warning；全部课程都失败 ⇒ 抛 `parse_error`；
+   *   5. 容器识别不了 `examList` ⇒ 抛 `parse_error`（**绝不能**返回空数组）。
+   *
+   * 只读：全部为 GET（经 `lmsGet`，它只做 fetch，无 method 覆写）。
+   */
+  async listExams(options: ListOptions = {}): Promise<ListItemsResult<ExamItem>> {
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const page = await this.session.getPage(HOST);
+    page.setDefaultTimeout(timeoutMs);
+
+    // 会话前置检查（复用现有实现，已实测可用）。
+    const status = await this.checkSession();
+    if (status.state !== 'connected') {
+      throw new LmsExamSessionExpiredError(`${status.state}: ${status.message}`);
+    }
+
+    // 课程列表必须走 /courseapi（实测：/utestapi 下没有课程列表，证据表 A.5）。
+    const courses = await this.listCourses(page);
+    if (!courses) {
+      throw new LmsExamParseError('课程列表结构无法识别');
+    }
+
+    const lastSyncAt = new Date().toISOString();
+    const items: ExamItem[] = [];
+    const warnings: string[] = [];
+    const maxCourses = options.maxCourses ?? 40;
+    const courseList = courses.slice(0, Math.max(0, maxCourses));
+    let complete = courses.length <= courseList.length;
+    if (!complete) {
+      warnings.push(`课程数量 ${courses.length} 超过单次上限 ${maxCourses}，考试只读取了前 ${courseList.length} 门`);
+    }
+
+    /** 至少有一个课程成功解析出合法容器，才允许返回 0 条 = "确认没有考试"。 */
+    let anyCourseParsed = false;
+    /** 每个课程最后一次失败原因（用于全失败时汇总报错）。 */
+    const failures: string[] = [];
+
+    for (const course of courseList) {
+      const label = course.name ?? String(course.id);
+      try {
+        const rows = await this.listCourseExamRows(page, course.id);
+        // 容器解析成功（哪怕 examList 为空）⇒ 该课程这侧可信。
+        anyCourseParsed = true;
+        const normalized = normalizeExamItems(
+          { id: course.id, name: course.name ?? null },
+          rows,
+          lastSyncAt,
+        );
+        items.push(...normalized.items);
+        warnings.push(...normalized.warnings.map((w) => `[${label}] ${w}`));
+      } catch (err) {
+        if (err instanceof LmsExamSessionExpiredError) throw err; // 会话失效：整次失败
+        complete = false;
+        const msg = err instanceof Error ? err.message : String(err);
+        failures.push(`${label}: ${msg.slice(0, 140)}`);
+        warnings.push(`课程「${label}」考试读取失败：${msg.slice(0, 140)}`);
+      }
+    }
+
+    // 所有课程都没能解析出容器 ⇒ 这是"读不懂"，不是"没有考试"。
+    if (!anyCourseParsed && courseList.length > 0) {
+      throw new LmsExamParseError(
+        `全部 ${courseList.length} 门课程的考试列表都无法解析（可能两条候选接口都不存在或响应形状改变）：` +
+          failures.slice(0, 3).join('；'),
+      );
+    }
+
+    items.sort((x, y) => {
+      const xs = x.startsAt ? Date.parse(x.startsAt) : Number.MAX_SAFE_INTEGER;
+      const ys = y.startsAt ? Date.parse(y.startsAt) : Number.MAX_SAFE_INTEGER;
+      if (xs !== ys) return xs - ys;
+      return x.title.localeCompare(y.title, 'zh-CN');
+    });
+
+    return { items, complete, warnings };
   }
 
   async close(): Promise<void> {
@@ -377,6 +498,32 @@ export class UlearningAssignmentSource implements AssignmentSource {
     const body = res.body as { courseList?: LmsCourseRow[] } | null;
     if (!body || !Array.isArray(body.courseList)) return null;
     return body.courseList;
+  }
+
+  /**
+   * 读取某门课程的考试行（先新分支、后旧分支）。
+   *
+   * ═══════════════════════════════════════════════════════════════════
+   * ⚠️ 未验证：两条候选接口的**存在性与响应形状**都未拿到真实响应。
+   *    - 新分支 `/utestapi/exams/student?ocId=&pn=&ps=`（`Exam.js:1786`，代码证据）
+   *    - 旧分支 `/courseapi/exams/student?ocId=&keyword=&pn=&ps=&lang=zh`（`Exam.js:150`，代码证据）
+   *    未登录直连实测两者均 401 `{code:2001}`（只证明 `exams/**` handler 组存在，
+   *    不证明 `/exams/student` 这个具体 handler 存在 —— 证据表 A.3/A.4）。
+   * ═══════════════════════════════════════════════════════════════════
+   *
+   * @throws LmsExamSessionExpiredError 401/403 或业务码 2001/2101/2201（必须整次失败）
+   * @throws LmsExamParseError 两条分支都拿不到可解析容器
+   */
+  async listCourseExamRows(
+    page: Awaited<ReturnType<BrowserSession['getPage']>>,
+    courseId: number,
+    pageSize = 20,
+  ): Promise<LmsExamRow[]> {
+    return fetchExamRowsWithFallback(
+      (path) => this.lmsGet(page, path),
+      courseId,
+      pageSize,
+    );
   }
 
   /**
@@ -484,6 +631,7 @@ export class UlearningAssignmentSource implements AssignmentSource {
     const detailUrl = `${BASE}/courseweb/ulearning/index.html#/course/homework?courseId=${course.id}`;
 
     return {
+      kind: 'homework',
       source: SOURCE,
       sourceAssignmentId: String(row.id),
       id: assignmentId(SOURCE, String(row.id)),
@@ -583,6 +731,81 @@ export class UnverifiedEndpointError extends Error {
   }
 }
 
+/**
+ * 考试列表的「先新后旧」双分支拉取（docs/LMS-EXAM-PLAN.md §6.4）。
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * ⚠️ 未验证：两条候选接口的**存在性与响应形状**都未拿到真实响应。
+ *    - 新分支 `/utestapi/exams/student?ocId=&pn=&ps=`（`Exam.js:1786`，代码证据）
+ *    - 旧分支 `/courseapi/exams/student?ocId=&keyword=&pn=&ps=&lang=zh`（`Exam.js:150`，代码证据）
+ *    未登录直连实测两者均 401 `{code:2001}`（只证明 `exams/**` handler 组存在，
+ *    不证明 `/exams/student` 这个具体 handler 存在 —— 证据表 A.3/A.4）。
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * 为什么是「先新后旧、失败回退」而不是「先判 `hasMenu(54)` 再选分支」：
+ * 判分支要多一次 GET，且 `hasMenu` 的响应形状未验证（C.4）；回退策略不需要理解它的语义。
+ *
+ * 抽成独立函数（而非私有方法）以便注入请求函数做单测 —— 分支回退是 §6.4 的核心逻辑，
+ * 不能因为没有真实登录态就完全不测。
+ *
+ * @param get 发 GET 并返回 `{status, body}`（生产环境是 `lmsGet`）
+ * @throws LmsExamSessionExpiredError 401/403 或业务码 2001/2101/2201 ⇒ 必须整次同步失败
+ * @throws LmsExamParseError 两条分支都拿不到可解析容器（**绝不**退化为空数组）
+ */
+export async function fetchExamRowsWithFallback(
+  get: (path: string) => Promise<{ status: number; body: unknown }>,
+  courseId: number,
+  pageSize = 20,
+): Promise<LmsExamRow[]> {
+  const candidates = [
+    // 新分支：UTEST_API_HOST + '/exams/student'
+    // （不是 /utest/ —— 证据表 B.8 已明确 /utest/ 是答题 SPA，不是列表页）
+    `/utestapi/exams/student?ocId=${courseId}&pn=1&ps=${pageSize}`,
+    // 旧分支：API_SERVER_HOST + '/exams/student'
+    `/courseapi/exams/student?ocId=${courseId}&keyword=&pn=1&ps=${pageSize}&lang=zh`,
+  ] as const;
+
+  const errors: string[] = [];
+
+  for (const [index, path] of candidates.entries()) {
+    const res = await get(path);
+
+    // 会话失效：立即抛错，不逐课程重试（§6.4 c）。
+    const bizCode = bizCodeOf(res.body);
+    if (res.status === 401 || res.status === 403) {
+      throw new LmsExamSessionExpiredError(`HTTP ${res.status}`);
+    }
+    if (bizCode === 2001 || bizCode === 2101 || bizCode === 2201) {
+      throw new LmsExamSessionExpiredError(`业务码 ${bizCode}（token 缺失/过期）`);
+    }
+
+    const label = index === 0 ? 'utestapi' : 'courseapi';
+
+    // 404 / 非 JSON 明确表示"这条分支没有此接口" ⇒ 回退下一条。
+    if (res.status === 404 || (res.status === 200 && res.body === null)) {
+      errors.push(`${label} 分支 HTTP ${res.status}${res.body === null ? ' 且响应非 JSON' : ''}`);
+      continue;
+    }
+    if (res.status !== 200) {
+      errors.push(`${label} 分支 HTTP ${res.status}`);
+      continue;
+    }
+
+    // 容器识别不了会抛 LmsExamParseError：新分支继续回退，旧分支是最后一条 ⇒ 直接抛。
+    try {
+      return extractExamRows(res.body);
+    } catch (err) {
+      errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+      if (index === 0) continue;
+      throw err;
+    }
+  }
+
+  throw new LmsExamParseError(
+    `课程 ${courseId} 的两条候选考试接口均不可用：${errors.join('；').slice(0, 240)}`,
+  );
+}
+
 /** 安全读取当前 URL。 */
 function safeUrl(page: { url(): string }): string {
   try {
@@ -590,6 +813,16 @@ function safeUrl(page: { url(): string }): string {
   } catch {
     return '';
   }
+}
+
+/**
+ * 从响应体里取业务码（未验证：LMS 的业务码字段名 —— 实测 401 响应体为 `{code:2001}`，
+ * 沿用该字段名；其它错误形态可能不带 code）。
+ */
+function bizCodeOf(body: unknown): number | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const code = (body as { code?: unknown }).code;
+  return typeof code === 'number' ? code : null;
 }
 
 function needsLogin(lastSuccessAt: string | null, now: string): SessionStatus {

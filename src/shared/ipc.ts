@@ -5,31 +5,58 @@
  *  - 只暴露这些白名单方法，不暴露 ipcRenderer 本身。
  *  - 不传递任何凭证、Cookie、Token。
  *  - 所有入参在主进程重新校验（渲染进程不可信）。
+ *
+ * 数据结构（2026-11-11 起）：
+ *  - 列表实体是**判别联合** `UiAssignment = UiHomework | UiExam`，靠 `kind` 收窄。
+ *    不能用 `interface ... extends Assignment | ExamItem`（TS2312：interface 不能 extends 联合）。
+ *  - 作业有 submissionStatus/dueAt；考试有 startsAt/endsAt/attendance，
+ *    但**物理上不存在** submissionStatus —— 类型层面堵死「凭空编造考试参加状态」。
+ *  - 分类依据是**接口来源模块**，不是标题内容（用户 2026-11-11 决策 D4）。
  */
 
-import type { Assignment, SourceId, SessionStatus } from '@dgut-deadline/shared';
+import type {
+  Assignment,
+  ExamItem,
+  ListItemKind,
+  SessionStatus,
+  SourceId,
+} from '@dgut-deadline/shared';
+import type { ExamThresholdSetting, ThresholdSetting } from './thresholds';
 
-export interface UiAssignment extends Assignment {
-  /** 剩余时间文案（渲染进程用统一时钟计算）。 */
+/** 两种实体共用的 UI 附加字段（主进程组装，渲染进程只读）。 */
+interface UiMeta {
+  /** 平台中文名（用于展示，避免渲染层再查表）。 */
   sourceLabel: string;
-  /** 是否来自手动覆盖。 */
+  /** 是否被用户手动覆盖（考试一期不支持覆盖，恒 false）。 */
   overridden: boolean;
   /** 是否为演示数据（UI 必须显著标识，不得与真实数据混淆）。 */
   isDemo?: boolean;
 }
+
+export type UiHomework = Assignment & UiMeta;
+export type UiExam = ExamItem & UiMeta;
+/** 列表实体联合。访问 kind 专有字段前必须先收窄（isExamItem/isHomeworkItem）。 */
+export type UiAssignment = UiHomework | UiExam;
 
 export interface SourceStateDto {
   source: SourceId;
   label: string;
   session: SessionStatus | null;
   lastSuccessAt: string | null;
-  /** 该平台的作业数（缓存）。 */
+  /** 该平台条目总数（作业 + 考试）。 */
   count: number;
   /** 数据是否可能过期。 */
   stale: boolean;
+  /**
+   * 按 kind 的明细，用于 UI 显示「N 条作业 / M 场考试」。
+   * 可选：老主进程不产出该字段时 UI 退化到 count。
+   * 只在该平台确实具备对应能力（有缓存或曾同步成功）时才列出，避免把「不具备能力」显示成「0 场考试」。
+   */
+  kinds?: { kind: ListItemKind; count: number; stale: boolean }[];
 }
 
 export interface AppSnapshot {
+  /** 作业 + 考试的统一列表；已按「锚点」（作业 dueAt / 考试 startsAt）排序。 */
   assignments: UiAssignment[];
   sources: SourceStateDto[];
   settings: SettingsDto;
@@ -45,8 +72,12 @@ export interface AppSnapshot {
 }
 
 export interface SettingsDto {
-  /** 提醒阈值（可逐项开关 + 强制弹出标记）。 */
-  thresholds: { hours: number; enabled: boolean; urgent: boolean }[];
+  /** 作业提醒阈值（小时级，可逐项开关 + 强制弹出标记）。 */
+  thresholds: ThresholdSetting[];
+  /** 考试提醒阈值（分钟级，锚点 = 开考/结束）。与 thresholds 物理分离，见 §5.4。 */
+  examThresholds: ExamThresholdSetting[];
+  /** 是否同步优学院考试。默认 false：考试接口尚未用真实响应验证过。 */
+  examSyncEnabled: boolean;
   syncIntervalMinutes: number;
   quietHours: { enabled: boolean; start: string; end: string };
   launchAtLogin: boolean;
@@ -55,6 +86,8 @@ export interface SettingsDto {
   theme: 'light' | 'dark' | 'system';
   /** 是否显示演示数据（UI 会显著标注「演示」）。 */
   showDemoData?: boolean;
+  /** 已结束考试在列表中保留多少小时（便于回看考场/座位），默认 24。 */
+  endedExamRetentionHours?: number;
 }
 
 export type IpcChannel =

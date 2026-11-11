@@ -21,7 +21,7 @@ import { buildSnapshot } from './ipc/snapshot.js';
 import { detectEdge } from './browser/session.js';
 import { ReminderScheduler } from './reminder/scheduler.js';
 import { ToastManager } from './reminder/toast-manager.js';
-import { normalizeThresholds } from '../shared/thresholds.js';
+import { normalizeExamThresholds, normalizeThresholds } from '../shared/thresholds.js';
 import { isAllowedDetailUrl } from '@dgut-deadline/shared';
 
 let mainWindow: BrowserWindow | null = null;
@@ -239,9 +239,10 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('app:openAssignment', async (_e, id: string) => {
-    const all = store.getAllAssignments();
+    // 作业与考试都可能被「打开」：用合并视图查找
+    const all = store.getAllListItems();
     const found = all.find((a) => a.id === id);
-    if (!found) return { ok: false, reason: '作业不存在' };
+    if (!found) return { ok: false, reason: '该条目不存在（可能已被平台移除）' };
     if (!isAllowedDetailUrl(found.source, found.detailUrl)) {
       return { ok: false, reason: '该链接不在允许列表内，已阻止打开' };
     }
@@ -255,6 +256,17 @@ function registerIpc(): void {
     if (Array.isArray(patch['thresholds'])) {
       const normalized = normalizeThresholds(patch['thresholds']);
       if (normalized.length) safe['thresholds'] = normalized;
+    }
+    if (Array.isArray(patch['examThresholds'])) {
+      const normalized = normalizeExamThresholds(patch['examThresholds']);
+      if (normalized.length) safe['examThresholds'] = normalized;
+    }
+    if (typeof patch['examSyncEnabled'] === 'boolean') {
+      safe['examSyncEnabled'] = patch['examSyncEnabled'];
+    }
+    if (typeof patch['endedExamRetentionHours'] === 'number') {
+      const v = Math.max(0, Math.min(24 * 30, Math.floor(patch['endedExamRetentionHours'] as number)));
+      safe['endedExamRetentionHours'] = v;
     }
     if (typeof patch['syncIntervalMinutes'] === 'number') {
       const v = Math.max(0, Math.min(24 * 60, Math.floor(patch['syncIntervalMinutes'] as number)));
@@ -410,8 +422,14 @@ function registerIpc(): void {
         settings: snap.settings,
         sources: snap.sources,
         assignmentCount: snap.assignments.length,
-        // 仅统计，不导出作业正文
+        // 仅统计，不导出正文。必须按 kind 分组：
+        // 考试项没有 submissionStatus，直接取会得到 "undefined" 桶（既有缺陷）。
+        kindCounts: snap.assignments.reduce<Record<string, number>>((acc, a) => {
+          acc[a.kind] = (acc[a.kind] ?? 0) + 1;
+          return acc;
+        }, {}),
         statusCounts: snap.assignments.reduce<Record<string, number>>((acc, a) => {
+          if (a.kind !== 'homework') return acc;
           acc[a.submissionStatus] = (acc[a.submissionStatus] ?? 0) + 1;
           return acc;
         }, {}),

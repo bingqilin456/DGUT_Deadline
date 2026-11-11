@@ -10,6 +10,7 @@ const TZ = '+08:00';
 
 function mkA(over: Partial<Assignment> = {}): Assignment {
   return {
+    kind: 'homework',
     source: 'hw',
     sourceAssignmentId: '1',
     id: 'hw:1',

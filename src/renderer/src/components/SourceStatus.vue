@@ -33,6 +33,29 @@ function lastText(s: SourceStateDto): string {
   return `上次成功 ${d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`;
 }
 
+/**
+ * 缓存条目明细：「N 条作业 / M 场考试」。
+ *
+ * 只在主进程确实给出 kinds 明细时展示；缺失时退化到总数，
+ * 避免把「不具备考试能力」显示成「0 场考试」（那是把未知伪装成事实）。
+ */
+function countText(s: SourceStateDto): string {
+  if (!s.kinds || s.kinds.length === 0) return `${s.count} 条缓存条目`;
+  const hw = s.kinds.find((k) => k.kind === 'homework');
+  const ex = s.kinds.find((k) => k.kind === 'exam');
+  const parts: string[] = [];
+  if (hw) parts.push(`${hw.count} 条作业`);
+  if (ex) parts.push(`${ex.count} 场考试`);
+  return parts.join(' / ') || `${s.count} 条缓存条目`;
+}
+
+/** 按 kind 的过期提示（作业与考试分别可能过期）。 */
+function staleKinds(s: SourceStateDto): string[] {
+  if (!s.kinds) return [];
+  const labels: Record<string, string> = { homework: '作业', exam: '考试' };
+  return s.kinds.filter((k) => k.stale).map((k) => labels[k.kind] ?? k.kind);
+}
+
 const visible = computed(() => props.sources);
 </script>
 
@@ -44,10 +67,12 @@ const visible = computed(() => props.sources);
           <i class="dot" :class="chipClass(s)" aria-hidden="true" />
           <strong>{{ s.label }}</strong>
           <span class="source-state" :class="chipClass(s)">{{ chipText(s) }}</span>
-          <span v-if="s.stale" class="badge warn">可能过期</span>
+          <span v-if="s.stale" class="badge warn" :title="staleKinds(s).length ? `过期：${staleKinds(s).join('、')}` : undefined">
+            可能过期{{ staleKinds(s).length ? `（${staleKinds(s).join('、')}）` : '' }}
+          </span>
         </div>
         <div class="source-detail">
-          <span>{{ s.count }} 条缓存作业</span>
+          <span>{{ countText(s) }}</span>
           <span class="sync-meta">{{ lastText(s) }}</span>
         </div>
       </div>

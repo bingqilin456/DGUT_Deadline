@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import type { SettingsDto } from '../../../shared/ipc';
+import { describeExamThreshold, type ExamThresholdSetting } from '../../../shared/thresholds';
 import DiagnosticPanel from './DiagnosticPanel.vue';
 
 const props = defineProps<{ settings: SettingsDto }>();
@@ -73,6 +74,95 @@ function setTheme(e: Event): void {
   const v = (e.target as HTMLSelectElement).value as SettingsDto['theme'];
   emit('update', { theme: v });
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 考试提醒（分钟级，锚点 = 开考 / 结束）
+//
+// 为什么独立于作业阈值：作业按「截止前 N 小时」，考试按「开考前 N 分钟」，
+// 语义与精度都不同（见 src/shared/thresholds.ts 的说明）。
+// 参加状态：平台未提供可信字段，本应用一期恒显示「未知」，不做任何推断。
+// ──────────────────────────────────────────────────────────────────────
+
+/** 按 |offset| 降序展示：越早提醒的排前面（与 enabledExamThresholds 顺序一致）。 */
+const examThresholds = computed(() =>
+  [...(props.settings.examThresholds ?? [])].sort(
+    (a, b) => Math.abs(b.offsetMinutes) - Math.abs(a.offsetMinutes),
+  ),
+);
+
+/** 新增考试阈值时的临时输入。 */
+const newExamAnchor = ref<'start' | 'end'>('start');
+const newExamMinutes = ref('');
+
+function patchExamThresholds(next: ExamThresholdSetting[]): void {
+  emit('update', { examThresholds: next });
+}
+
+function toggleExamEnabled(t: ExamThresholdSetting, enabled: boolean): void {
+  patchExamThresholds(
+    examThresholds.value.map((x) =>
+      x.anchor === t.anchor && x.offsetMinutes === t.offsetMinutes ? { ...x, enabled } : x,
+    ),
+  );
+}
+
+function toggleExamUrgent(t: ExamThresholdSetting, urgent: boolean): void {
+  patchExamThresholds(
+    examThresholds.value.map((x) =>
+      x.anchor === t.anchor && x.offsetMinutes === t.offsetMinutes ? { ...x, urgent } : x,
+    ),
+  );
+}
+
+function removeExamThreshold(t: ExamThresholdSetting): void {
+  // 至少保留一条，否则考试就完全不会提醒了（用户可能误删后毫无感觉）
+  if (examThresholds.value.length <= 1) return;
+  patchExamThresholds(
+    examThresholds.value.filter((x) => !(x.anchor === t.anchor && x.offsetMinutes === t.offsetMinutes)),
+  );
+}
+
+/**
+ * 新增考试阈值。
+ *
+ * 限幅与主进程 normalizeExamThresholds 保持一致（-1440 ~ 43200 分钟），
+ * 但主进程会再校验一次（渲染进程不可信）。
+ */
+function addExamThreshold(): void {
+  const raw = newExamMinutes.value.trim();
+  if (raw === '') return;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    newExamMinutes.value = '';
+    return;
+  }
+  const minutes = Math.round(n);
+  if (minutes < -1440 || minutes > 30 * 1440) {
+    newExamMinutes.value = '';
+    return;
+  }
+  const anchor = newExamAnchor.value;
+  if (examThresholds.value.some((x) => x.anchor === anchor && x.offsetMinutes === minutes)) {
+    newExamMinutes.value = '';
+    return;
+  }
+  patchExamThresholds([
+    ...examThresholds.value,
+    { anchor, offsetMinutes: minutes, enabled: true, urgent: minutes <= 120 },
+  ]);
+  newExamMinutes.value = '';
+}
+
+/** 全局开关：同步优学院考试（默认 false —— 接口未用真实响应验证）。 */
+function setExamSync(e: Event): void {
+  emit('update', { examSyncEnabled: (e.target as HTMLInputElement).checked });
+}
+
+/** 已结束考试保留小时数（便于回看考场/座位）。 */
+function setRetention(e: Event): void {
+  const v = Number((e.target as HTMLInputElement).value);
+  if (Number.isFinite(v) && v >= 0) emit('update', { endedExamRetentionHours: Math.floor(v) });
+}
 </script>
 
 <template>
@@ -140,6 +230,112 @@ function setTheme(e: Event): void {
         />
         <span class="muted-sm">小时后按回车添加</span>
       </div>
+    </div>
+
+    <div class="field" style="display: block">
+      <div style="display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap">
+        <span class="label" style="width: auto">考试提醒</span>
+        <span class="hint" style="padding-left: 0">
+          考试以「开考时间」为锚点（提醒粒度到分钟）。勾选「强制」的项<b>不受静默时段限制</b>。
+        </span>
+      </div>
+
+      <p class="exam-caveat">
+        考试参加状态：<b>平台未提供可信字段，本应用不做推断</b>。列表中该列固定显示「参加状态未知」，
+        不会出现「未参加」「未提交」「已提交」。
+      </p>
+
+      <table class="threshold-table exam-threshold-table">
+        <thead>
+          <tr>
+            <th style="width: 140px">提醒时间</th>
+            <th style="width: 70px">启用</th>
+            <th style="width: 90px">强制弹出</th>
+            <th>说明</th>
+            <th style="width: 60px"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in examThresholds" :key="`${t.anchor}:${t.offsetMinutes}`">
+            <td><strong>{{ describeExamThreshold(t) }}</strong></td>
+            <td>
+              <input
+                type="checkbox"
+                :checked="t.enabled"
+                @change="toggleExamEnabled(t, ($event.target as HTMLInputElement).checked)"
+              />
+            </td>
+            <td>
+              <input
+                type="checkbox"
+                :checked="t.urgent"
+                :disabled="!t.enabled"
+                @change="toggleExamUrgent(t, ($event.target as HTMLInputElement).checked)"
+              />
+            </td>
+            <td class="muted-sm">
+              <span v-if="!t.enabled">已关闭，不会提醒</span>
+              <span v-else-if="t.urgent">强提醒（弹窗 + 任务栏闪烁，不受静默时段限制）</span>
+              <span v-else>普通提醒（静默时段内不弹）</span>
+            </td>
+            <td>
+              <button class="link" :disabled="examThresholds.length <= 1" @click="removeExamThreshold(t)">
+                删除
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap">
+        <span class="muted-sm">新增：</span>
+        <!-- 锚点用单选而不是 <select>：scripts/fluent-ui-e2e.mjs:110 用 `locator('.settings select')`
+             直接选主题下拉（无 .first()），设置页多出任何 <select> 都会造成 strict mode 冲突。
+             scripts/ 不在本任务写作用域内，故用 radio 规避。 -->
+        <label class="muted-sm exam-anchor-radio">
+          <input v-model="newExamAnchor" type="radio" value="start" name="exam-anchor" />
+          开考
+        </label>
+        <label class="muted-sm exam-anchor-radio">
+          <input v-model="newExamAnchor" type="radio" value="end" name="exam-anchor" />
+          结束
+        </label>
+        <input
+          v-model="newExamMinutes"
+          type="number"
+          :min="-1440"
+          :max="43200"
+          placeholder="提前分钟数"
+          style="width: 130px"
+          @keyup.enter="addExamThreshold"
+        />
+        <span class="muted-sm">分钟前（负数 = 锚点之后，如 -30 = 开考后 30 分钟）</span>
+        <button class="btn btn-sm" @click="addExamThreshold">添加</button>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap">
+        <span class="muted-sm">已结束的考试在列表中保留</span>
+        <input
+          type="number"
+          min="0"
+          max="720"
+          style="width: 90px"
+          :value="settings.endedExamRetentionHours ?? 24"
+          @change="setRetention"
+        />
+        <span class="muted-sm">小时（便于回看考场与座位；0 = 结束后立刻隐藏）</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="label">同步优学院考试</span>
+      <input type="checkbox" :checked="settings.examSyncEnabled" @change="setExamSync" />
+      <span>把优学院「考试」模块的场次也读进来</span>
+      <span class="hint">
+        <b>默认开启</b>。开启后若考试同步失败（未登录、接口变更等），会明确显示
+        「考试同步失败」并保留上次数据，<b>不会</b>伪装成「0 场考试」。
+        考试接口尚未用真实响应验证，若你发现读到的考试不对，可先关闭此项只保留作业提醒。
+      </span>
     </div>
 
     <div class="field">
@@ -262,8 +458,23 @@ function setTheme(e: Event): void {
     </div>
 
     <p class="footer-note">
-      本软件仅读取你在学校平台上有权查看的作业信息，不会提交作业、不会修改任何学校数据，
+      本软件仅读取你在学校平台上有权查看的作业与考试信息，不会提交作业、不会修改任何学校数据，
       也不会接入 AI、云服务器或任何付费接口。所有数据保存在你的本机。
     </p>
   </div>
 </template>
+
+<style scoped>
+.exam-caveat {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+}
+.exam-caveat b { color: var(--text); }
+.exam-threshold-table { table-layout: auto; }
+.exam-anchor-radio { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+</style>

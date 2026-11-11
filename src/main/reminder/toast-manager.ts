@@ -17,22 +17,12 @@
 import { BrowserWindow, app, screen, shell } from 'electron';
 import { join } from 'node:path';
 import type { PlannedReminder } from '../reminder/planner.js';
+import { reminderText } from '../reminder/planner.js';
 import { isAllowedDetailUrl } from '@dgut-deadline/shared';
 
-/** 单个弹窗卡片需要的数据。 */
-export interface ToastItem {
-  /** 幂等键，用于确认后回调。 */
-  key: string;
-  title: string;
-  body: string;
-  /** 是否强制提醒（红色样式 + 不自动消失）。 */
-  urgent: boolean;
-  /** 该提醒对应的源站链接（可为空）。 */
-  detailUrl: string | null;
-  courseName: string | null;
-  assignmentTitle: string;
-  thresholdHours: number;
-}
+/** 单个弹窗卡片需要的数据（定义在 src/shared/toast.ts，三方共用）。 */
+export type { ToastItem } from '../../shared/toast.js';
+import type { ToastItem } from '../../shared/toast.js';
 
 const CARD_W = 380;
 const CARD_H = 116;
@@ -120,31 +110,20 @@ export class ToastManager {
   // ── 内部 ─────────────────────────────────────────────
 
   private toItem(r: PlannedReminder): ToastItem {
-    const due = r.dueAt
-      ? new Date(r.dueAt).toLocaleString('zh-CN', {
-          timeZone: 'Asia/Shanghai',
-          hour12: false,
-        })
-      : '截止时间未知';
-    const title = r.urgent
-      ? r.thresholdHours <= 1
-        ? '⚠️ 1 小时内截止！'
-        : `⚠️ 还有 ${r.thresholdHours} 小时截止`
-      : `作业即将截止（${r.thresholdHours} 小时）`;
-    const body =
-      r.certainty === 'needs_check'
-        ? `《${r.title}》提交状态无法确认，截止：${due}。请打开平台核对。`
-        : `《${r.title}》${r.courseName ? `（${r.courseName}）` : ''} 截止：${due}。`;
+    // 文案统一由 planner 产出：作业与考试措辞完全不同，
+    // 这里另写一套会产出"作业即将截止"这类错误文案（考试用的是开考时间）。
+    const text = reminderText(r);
 
     return {
       key: r.key,
-      title,
-      body,
+      title: text.title,
+      body: text.body,
       urgent: r.urgent,
       detailUrl: null,
       courseName: r.courseName,
       assignmentTitle: r.title,
       thresholdHours: r.thresholdHours,
+      kind: r.kind,
     };
   }
 
