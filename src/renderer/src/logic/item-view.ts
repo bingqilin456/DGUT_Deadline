@@ -171,13 +171,45 @@ export function statusCell(a: UiAssignment, nowMs: number): Badge {
 }
 
 /**
- * 参加状态徽标（仅考试）。
+ * 参加/交卷状态徽标（仅考试）。
  *
- * 一期恒为「未知」：列表接口没有任何字段能可靠回答「我参加了没」。
- * 这里显示的是**未知本身**，不是「未参加」。
+ * 2026-11-13 基于 `/utestapi/exams/student` 实测响应接入：
+ *  - `submitted`（`answerTimes >= 1`）：显示「已交卷 X/Y」（不限次数显示「已交卷 X次」），悬停显示得分；
+ *  - `not_submitted`（`answerTimes === 0`）：显示「未交卷 0/Y」（不限次数显示「未交卷」）；
+ *  - `unknown`（字段缺失）：保守显示「参加状态未知」，不做推断。
  */
 export function attendanceBadge(a: UiAssignment): Badge | null {
   if (a.kind !== 'exam') return null;
+
+  const ans = typeof a.answerTimes === 'number' && Number.isFinite(a.answerTimes) ? a.answerTimes : null;
+  const lim =
+    typeof a.limitTimes === 'number' && Number.isFinite(a.limitTimes) && a.limitTimes > 0
+      ? a.limitTimes
+      : null;
+
+  if (a.attendance === 'submitted') {
+    const text =
+      ans !== null && lim !== null
+        ? `已交卷 ${ans}/${lim}`
+        : ans !== null
+          ? `已交卷 ${ans}次`
+          : '已交卷';
+    const title =
+      typeof a.score === 'number' && Number.isFinite(a.score)
+        ? `得分：${a.score} 分（${a.attendanceEvidence}）`
+        : `已交卷（${a.attendanceEvidence}）`;
+    return { text, cls: 'ok', title };
+  }
+
+  if (a.attendance === 'not_submitted') {
+    const text = ans !== null && lim !== null ? `未交卷 ${ans}/${lim}` : '未交卷';
+    return {
+      text,
+      cls: 'warn',
+      title: `尚未交卷（${a.attendanceEvidence}）`,
+    };
+  }
+
   return {
     text: '参加状态未知',
     cls: 'muted',

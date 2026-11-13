@@ -11,13 +11,25 @@
  *   {"code":2001,"message":"缺少访问token"}
  * 这是前端 `init.js` 里 `$.ajaxSetup.beforeSend` 的行为，本适配器照此复现。
  *
- * ## 登录链路（三段，DGUT 特有）
+ * ## 登录链路（四段，DGUT 特有）
  * 认证中心只信任来自应用中心 `application.dgut.edu.cn` 的请求，因此：
  *   A. CAS，service 必须指向应用中心：
  *      https://auth.dgut.edu.cn/authserver/login
  *        ?service=https%3A%2F%2Fapplication.dgut.edu.cn%2Fappapi%2Fcas%2Ffromcas
  *   B. 拿到 .dgut.edu.cn 域下的 AUTHORIZATION 与 token
- *   C. LMS 前端据 cookie 完成登录，之后才能调 API
+ *   C. 应用中心**前端必须真正渲染一次**才会把 AUTHORIZATION / USER_INFO 写进
+ *      `Domain=.dgut.edu.cn` 的 cookie（2026-11-11 实测：CAS 回到 fromcas 后不停留
+ *      在应用中心就跳 LMS，cookie 不会出现 → LMS 一直显示「登录 / 注册」）
+ *   D. 域级 cookie 自动带到 lms.dgut.edu.cn，LMS 前端据 cookie 完成登录，之后才能调 API
+ *
+ * ## 2026-11-11 实测纠正（本文件曾经的错误假设）
+ *   · `/sld/pc.html#/login`（优学院自身登录页）**整目录 404**，不能再作为登录入口；
+ *     LMS 自己的失效跳转是 `/courseweb/ulearning/tip/timeout.html`（实测 200）。
+ *   · 免密 URL 参数名是 **`token`**（不是 `AUTHORIZATION`），且**必须在 hash 段**：
+ *       https://lms.dgut.edu.cn/courseweb/ulearning/index.html#/index/courseList?token=<AUTHORIZATION>
+ *     依据 `init.js`: `var token = getHashParam("token"); if (token) setCookie("AUTHORIZATION", token, ...)`
+ *     桩验证：hash 里的 `?token=` 生效；查询串 `?token=` 与 hash 里的 `?AUTHORIZATION=` 均不生效。
+ *   · 「网络错误，点击重新加载」不是断网，是 `/courseapi/*` 拿不到有效 token 时的兜底 UI。
  *
  * ## 已验证接口
  *   GET /courseapi/courses/students?pn&ps&lang=zh
@@ -71,8 +83,20 @@ const HOST = 'lms.dgut.edu.cn';
 const CAS_TO_PORTAL =
   'https://auth.dgut.edu.cn/authserver/login?service=https%3A%2F%2Fapplication.dgut.edu.cn%2Fappapi%2Fcas%2Ffromcas';
 
+/** 应用中心（融合门户）根地址。用户登录的唯一可用入口，见文件头 §登录链路。 */
+const PORTAL_HOME = 'https://application.dgut.edu.cn/';
+
+/** 应用中心登录页（实测含「校园统一身份认证登录」按钮）。 */
+const PORTAL_LOGIN = 'https://application.dgut.edu.cn/#/login';
+
 /** LMS 课程列表页（hash 路由）。 */
 const LMS_HOME = `${BASE}/courseweb/ulearning/index.html#/index/courseList`;
+
+/** LMS 官方会话失效页（实测 200；`/sld/pc.html` 已 404）。 */
+const LMS_TIMEOUT = `${BASE}/ulearning/tip/timeout.html`;
+
+/** 「网络错误，点击重新加载」= 无效 token 兜底 UI 的文案（courseweb/common/nls/public.js）。 */
+const NETWORK_ERROR_MARKERS = ['网络错误', '重新加载'];
 
 /** 维护公告页特征（2026-11 实测）；命中即判为平台维护，而非零作业。 */
 const MAINTENANCE_MARKERS = ['系统更新维护通知', '系统维护公告', '暂停服务', '正在维护'];
@@ -138,47 +162,68 @@ export class UlearningAssignmentSource implements AssignmentSource {
     // 优先复用已登录的页面，避免把用户登录好的标签页覆盖掉
     const page = await this.session.getPage(HOST);
 
-    // 先检查是否已登录，已登录就绝不再导航
+    // ① 先探活：已登录就绝不再导航（也不去碰任何登录页）。
+    //    【关键】必须用 isValidToken 判有效，不能只看「cookie 是否存在」——
+    //    陈旧/失效的 AUTHORIZATION 会让 LMS 渲染「网络错误」，但状态栏可能还显示已登录。
     const current = await this.checkSession({ skipNavigation: true });
     if (current.state === 'connected' || current.state === 'platform_maintenance') {
       return current;
     }
 
     const curUrl = safeUrl(page);
-    const onLms = curUrl.includes(HOST);
-    const onCas = curUrl.includes('auth.dgut.edu.cn');
-    const onPortal = curUrl.includes('application.dgut.edu.cn');
+    const loc = classifyLmsLocation(curUrl);
 
-    if (onLms) {
+    // ② 导航到「唯一可用入口」：应用中心。
+    //    决策抽在 resolveLmsLoginTarget 里并加单测，防止后人改回坏 URL。
+    //    ⚠️ 绝不能导航到 /sld/pc.html#/login —— 该目录已 404（图2「404 Not Found」正是它）。
+    //    这一步同时覆盖「用户停在图1 的 LMS 坏页面上」的情形：
+    //    平台自身登录入口已 404，把用户留在原页等于让他无路可走。
+    const target = resolveLmsLoginTarget(curUrl);
+    if (target) {
+      await this.safeGoto(page, target);
+    }
+
+    // ②b 原本停在 LMS 页面上但会话无效（含图1「网络错误」页）：
+    //     给出针对性说明，告诉用户这不是断网。
+    if (loc === 'lms') {
       return {
         source: SOURCE,
         state: 'needs_login',
         message:
-          '浏览器已停在优学院页面，但尚未取得有效登录态。' +
-          '请在该窗口确认已登录（页面右上角显示你的名字），然后点「立即同步」。',
+          '优学院登录态已失效（页面显示「网络错误，点击重新加载」即为登录失效，不是断网）。' +
+          '已为你打开应用中心登录页，请点「校园统一身份认证登录」完成认证，' +
+          '成功后回到本应用点「立即同步」。',
         lastSuccessAt: this.lastSuccessAt,
         lastAttemptAt: now,
         requiresUserAction: true,
       };
     }
 
-    if (!onCas && !onPortal) {
-      await this.safeGoto(page, CAS_TO_PORTAL);
-      await this.completeSsoIfPossible(page);
-    } else {
-      await this.completeSsoIfPossible(page);
+    // ④ 若已有 CAS 会话（CASTGC / 已有 AUTHORIZATION）则自动完成换票。
+    //    【不阻塞 UI】没有可复用会话时**立即返回**，把"等用户手工登录"交给用户自己节奏，
+    //    而不是让「登录」按钮转 90 秒（旧行为，用户以为卡死了）。
+    const canAutoSso =
+      (await this.readAuthCookie(page)) !== null ||
+      (await this.hasCasTicket(page));
+    if (canAutoSso) {
+      await this.completeSsoIfPossible(page, 15_000);
     }
 
     const after = await this.checkSession({ skipNavigation: true });
     if (after.state === 'connected') return after;
 
+    // ⑤ 仍不可用：确保用户眼前是**能登录的页面**，而不是 404 或「网络错误」页。
+    if (!safeUrl(page).includes('application.dgut.edu.cn')) {
+      await this.safeGoto(page, PORTAL_LOGIN);
+    }
     return {
       source: SOURCE,
       state: 'needs_login',
       message:
-        '请在已弹出的浏览器窗口完成莞工中央认证（需填验证码；新设备还会要求短信二次验证），' +
-        '登录成功后回到本应用点「立即同步」。' +
-        '（优学院自身登录页已 404，只能经中央认证接入。）',
+        '请在已弹出的浏览器窗口中完成莞工中央认证（需填验证码；新设备还会要求短信二次验证）。' +
+        '认证成功后窗口会自动停在应用中心 / 优学院，' +
+        '确认页面右上角显示你的名字，然后回到本应用点「立即同步」。' +
+        '（优学院自身登录页 /sld/pc.html 已 404，只能经应用中心接入。）',
       lastSuccessAt: this.lastSuccessAt,
       lastAttemptAt: now,
       requiresUserAction: true,
@@ -186,8 +231,16 @@ export class UlearningAssignmentSource implements AssignmentSource {
   }
 
   /**
-   * 若已有 CAS 会话，则完成跳转：用 AUTHORIZATION 参数进入 LMS。
-   * 轮询等待用户输入验证码，一旦出现 AUTHORIZATION 立刻跳转。
+   * 若已有 CAS 会话，则完成「应用中心 → LMS」的换票；否则轮询等待用户手工登录。
+   *
+   * ═══════════════════════════════════════════════════════════════════
+   * 2026-11-11 实测两处关键纠正：
+   *  1. **必须让应用中心前端真正渲染一次**。CAS 回跳 `appapi/cas/fromcas` 后
+   *     cookie 由应用中心前端以 `Domain=.dgut.edu.cn` 写入；不等它渲染就直接跳 LMS，
+   *     AUTHORIZATION 尚未落地 → LMS 右上角仍「登录 / 注册」。
+   *  2. **URL 参数是 hash 里的 `token`**，不是 `AUTHORIZATION`，也不在查询串。
+   *     用错写法时 init.js 不认，等于没传 token。
+   * ═══════════════════════════════════════════════════════════════════
    */
   private async completeSsoIfPossible(
     page: Awaited<ReturnType<BrowserSession['getPage']>>,
@@ -195,15 +248,20 @@ export class UlearningAssignmentSource implements AssignmentSource {
   ): Promise<boolean> {
     try {
       const deadline = Date.now() + waitMs;
+      /**
+       * 只尝试换票一次。
+       *
+       * 为什么必须限制：应用中心可能残留**上次的过期 AUTHORIZATION**。
+       * 若每轮都拿它去跳 LMS，LMS 的 judgeToken() 判无效后会 logout 并弹回应用中心，
+       * 于是形成「跳 LMS → 被弹回 → 再跳 LMS」的空转，把 90 秒等待窗全部耗光。
+       * 跳过一次失败后改为**只等用户手工登录**（cookie 值变化即视为新票）。
+       */
+      let attemptedWith: string | null = null;
       while (Date.now() < deadline) {
-        const cookies = await page.context().cookies();
-        const auth = cookies.find((c) => c.name === 'AUTHORIZATION');
-        if (auth?.value) {
-          if (safeUrl(page).includes(HOST)) return true;
-          const url = `${LMS_HOME}?AUTHORIZATION=${encodeURIComponent(auth.value)}`;
-          await this.safeGoto(page, url);
-          await page.waitForTimeout(6_000);
-          return true;
+        const auth = await this.readAuthCookie(page);
+        if (auth && attemptedWith !== auth) {
+          attemptedWith = auth;
+          await this.enterLmsWithToken(page, auth);
         }
         if (safeUrl(page).includes(HOST)) return true;
         await page.waitForTimeout(2_000);
@@ -212,6 +270,68 @@ export class UlearningAssignmentSource implements AssignmentSource {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * 用 hash 里的 `token` 进入 LMS 课程列表（前端会把 token 落成 AUTHORIZATION cookie）。
+   * 已在该 hash 路由上时不做多余导航，避免打断用户。
+   */
+  private async enterLmsWithToken(
+    page: Awaited<ReturnType<BrowserSession['getPage']>>,
+    token: string,
+  ): Promise<void> {
+    const target = buildLmsTokenUrl(token);
+    const cur = safeUrl(page);
+    if (cur.startsWith(`${BASE}/courseweb/ulearning/index.html`) && /[#?&]token=/.test(cur)) return;
+    await this.safeGoto(page, target);
+    // init.js 在 DOM ready 后写 cookie，并立刻用 /courseapi 校验；留出落地时间。
+    await page.waitForTimeout(3_000);
+  }
+
+  /** 是否持有中央认证票据（CASTGC）。用于决定能否自动换票，避免让用户白等。 */
+  private async hasCasTicket(
+    page: Awaited<ReturnType<BrowserSession['getPage']>>,
+  ): Promise<boolean> {
+    try {
+      const cookies = await page.context().cookies();
+      return cookies.some((c) => c.name === 'CASTGC' && Boolean(c.value));
+    } catch {
+      return false;
+    }
+  }
+
+  /** 读取 AUTHORIZATION cookie（只读取值，不落盘、不打日志）。 */
+  private async readAuthCookie(
+    page: Awaited<ReturnType<BrowserSession['getPage']>>,
+  ): Promise<string | null> {
+    try {
+      const cookies = await page.context().cookies();
+      const c = cookies.find((x) => x.name === 'AUTHORIZATION');
+      return c?.value ? c.value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 用 LMS 官方探活接口校验 token 是否有效（无副作用）。
+   *
+   * 实测：`GET /courseapi/users/isValidToken/<token>` 返回裸 `true` / `false`（HTTP 200）。
+   * 依据 `model/User.js` 的 `judgeToken()`，LMS 前端自己也是这么判的。
+   */
+  private async isTokenValid(
+    page: Awaited<ReturnType<BrowserSession['getPage']>>,
+    token: string,
+  ): Promise<boolean> {
+    const r = await this.lmsGet(page, `/courseapi/users/isValidToken/${encodeURIComponent(token)}`);
+    if (r.status !== 200) return false;
+    // 响应可能是裸布尔，也可能是被包装过的 JSON；两种都认。
+    if (r.body === true) return true;
+    if (typeof r.body === 'object' && r.body !== null) {
+      const v = (r.body as { data?: unknown }).data;
+      return v === true;
+    }
+    return false;
   }
 
   /** 容错导航 */
@@ -294,7 +414,17 @@ export class UlearningAssignmentSource implements AssignmentSource {
         }
       }
       if (res.status !== 200) {
+        // 页面被 LMS 弹去非 LMS 源（401 → timeout.html → 应用中心）时，
+        // 同源 fetch 会打到别的源上得到 404/0，这同样是「未登录」而非「接口坏了」。
         return needsLogin(this.lastSuccessAt, now);
+      }
+
+      // 【关键】HTTP 200 但页面渲染的是「网络错误，点击重新加载」= token 无效的兜底 UI。
+      // 若不识别，就会把「登录已失效」当成「已连接」，然后在同步时才莫名失败。
+      if (await this.detectNetworkError(page)) {
+        return needsLogin(this.lastSuccessAt, now, {
+          stale: true,
+        });
       }
 
       this.lastSuccessAt = now;
@@ -721,6 +851,24 @@ export class UlearningAssignmentSource implements AssignmentSource {
       return false;
     }
   }
+
+  /**
+   * 识别 LMS 的「网络错误，点击重新加载」兜底页。
+   *
+   * 这不是断网：该文案来自 `courseweb/common/nls/public.js` 的 `netError`，
+   * 是 `/courseapi/*` 拿不到有效 token 时课程列表请求失败渲染的 UI。
+   * 把它识别为「登录失效」而不是「网络不可达」，用户才知道该去重新登录。
+   */
+  private async detectNetworkError(
+    page: Awaited<ReturnType<BrowserSession['getPage']>>,
+  ): Promise<boolean> {
+    try {
+      const text = await page.evaluate(() => document.body?.innerText?.slice(0, 4000) ?? '');
+      return NETWORK_ERROR_MARKERS.every((m) => text.includes(m));
+    } catch {
+      return false;
+    }
+  }
 }
 
 /** 作业接口未验证的专用错误（保留以兼容既有引用）。 */
@@ -825,15 +973,61 @@ function bizCodeOf(body: unknown): number | null {
   return typeof code === 'number' ? code : null;
 }
 
-function needsLogin(lastSuccessAt: string | null, now: string): SessionStatus {
+function needsLogin(
+  lastSuccessAt: string | null,
+  now: string,
+  opts: { stale?: boolean } = {},
+): SessionStatus {
   return {
     source: SOURCE,
     state: 'needs_login',
-    message:
-      '尚未登录优学院。请在已弹出的浏览器窗口完成莞工中央认证' +
-      '（需填验证码；新设备还会要求短信二次验证），然后回到本应用点「立即同步」。',
+    message: opts.stale
+      ? '优学院登录态已失效（页面显示「网络错误，点击重新加载」即为登录失效，不是断网）。' +
+        '请点「登录」重新完成莞工中央认证，然后点「立即同步」。'
+      : '尚未登录优学院。请点「登录」打开应用中心完成莞工中央认证' +
+        '（需填验证码；新设备还会要求短信二次验证），然后回到本应用点「立即同步」。',
     lastSuccessAt,
     lastAttemptAt: now,
     requiresUserAction: true,
   };
 }
+
+/** 当前页面所处站点（用 URL 判断，纯函数以便单测）。 */
+export type LmsPageLocation = 'lms' | 'cas' | 'portal' | 'other';
+
+export function classifyLmsLocation(url: string): LmsPageLocation {
+  if (url.includes('lms.dgut.edu.cn')) return 'lms';
+  if (url.includes('auth.dgut.edu.cn')) return 'cas';
+  if (url.includes('application.dgut.edu.cn')) return 'portal';
+  return 'other';
+}
+
+/**
+ * 决定「点登录」时该把窗口导航到哪里。
+ *
+ * 这是本文件最容易被改错的一处，故抽成纯函数并加单测保护：
+ *  · `lms`    → 应用中心登录页（用户已停在坏页面，必须主动带走；
+ *               旧实现把它留在原页并提示"点右上角登录"，而那个入口正是 404 的 /sld/pc.html）
+ *  · `cas`    → 不导航（用户正在填验证码，打断会丢状态）
+ *  · `portal` → 不导航（已在唯一可用入口）
+ *  · `other`  → 应用中心登录页（首次使用 / about:blank）
+ *
+ * **任何情况下都不返回 /sld/pc.html**（该目录已 404，见 docs/PLATFORM_FINDINGS.md）。
+ */
+export function resolveLmsLoginTarget(url: string): string | null {
+  const loc = classifyLmsLocation(url);
+  if (loc === 'cas' || loc === 'portal') return null;
+  return PORTAL_LOGIN;
+}
+
+/**
+ * 构造「带 token 免密进入 LMS」的 URL。
+ *
+ * 【实测关键】参数名是 `token` 且**必须在 hash 段**（`init.js` 用 `getHashParam("token")`）；
+ * 写成 `?AUTHORIZATION=` 或在查询串里都不生效 —— 这正是旧版「点立即同步 → 网络错误」的成因。
+ * 桩验证见 docs/TESTING.md「2026-11-11 LMS 登录跳转修复」。
+ */
+export function buildLmsTokenUrl(token: string): string {
+  return `${LMS_HOME}?token=${encodeURIComponent(token)}`;
+}
+

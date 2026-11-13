@@ -170,6 +170,10 @@ $.ajaxSetup({
 
 ### 3.3 🔑 登录链路：CAS 的 `service` 必须指向**应用中心**
 
+> **2026-11-11 更新（旧结论已修正，见 §3.9）**：本节表格中「LMS 自家登录页 `/sld/pc.html#/login`
+> 返回 404」是**永久下线**而非临时故障；且「带 token 跳转」的参数名是 **`token`** 且必须在 **hash** 里，
+> 不是 `AUTHORIZATION`。以 §3.9 为准。
+
 社区逆向资料（[博客园](https://www.cnblogs.com/resea/p/20135197)、
 [Greasy Fork](https://greasyfork.org/zh-CN/scripts/561583)）与实测共同确认：
 
@@ -178,7 +182,7 @@ $.ajaxSetup({
 | 做法 | 结果 |
 |---|---|
 | CAS `service` 指向 LMS | ❌ 被跳回门户，`AUTHORIZATION` 不写入 LMS |
-| LMS 自家登录页 `/sld/pc.html#/login` | ❌ **HTTP 404**（平台故障） |
+| LMS 自家登录页 `/sld/pc.html#/login` | ❌ **HTTP 404**（永久下线，见 §3.9） |
 | **CAS `service` 指向应用中心** | ✅ 拿到 `.dgut.edu.cn` 域下的 `AUTHORIZATION`(32位) + `token` |
 
 正确入口：
@@ -257,6 +261,128 @@ https://auth.dgut.edu.cn/authserver/login
 - 小组作业的提交状态语义
 - `homework.dgut.edu.cn` 独立子系统（当前对外 404，但主站 `/courseapi/homeworks/` 已可读，无需它）
 
+### 3.9 🔴 2026-11-11 登录跳转修复（**本节纠正了 §3.3 的旧结论**）
+
+用户报告两个 bug：点「立即同步」→ 受控 Edge 停在 LMS 课程列表并显示
+「网络错误，点击重新加载」；点「登录」→ 打开 `/sld/pc.html#/login` 得到 nginx 404。
+
+#### 实测证据（2026-11-11，校内网络）
+
+| 探测项 | 结果 |
+|---|---|
+| `GET /sld/pc.html` | **404**（nginx，永久下线） |
+| `GET /courseweb/ulearning/index.html` | 200 |
+| `GET /ulearning/tip/timeout.html` | 200（LMS **官方**的会话失效页） |
+| `GET /courseapi/users/isValidToken/<假token>` | 200，裸响应 `false`（可做无副作用探活） |
+| `GET /organization/index.html` | 301 → `https://application.dgut.edu.cn/#/portal` |
+| `GET /courseapi/courses/students`（无 token） | 401 |
+
+#### 根因一：「登录」指向了已下线的页面（图2）
+
+`/sld/pc.html#/login` 是 LMS 自带的登录按钮目标，该目录**已整站下线**。
+LMS 自己遇到 401 时的跳转是 `timeout.html` → `/` → 应用中心（实测导航轨迹）：
+```
+index.html#/index/courseList
+  → /ulearning/tip/timeout.html
+  → /
+  → https://application.dgut.edu.cn/#/portal
+```
+⇒ **唯一可用的登录入口是应用中心** `https://application.dgut.edu.cn/#/login`
+（实测含「校园统一身份认证登录」按钮）。
+
+#### 根因二：免密参数名/位置写错了（图1）
+
+`init.js` 开头：
+```js
+var token = getHashParam("token");
+if (token) { setCookie("AUTHORIZATION", token, null, "/", UMOOC_COOKIE_DOMAIN); }
+```
+`getHashParam` 只读 `location.hash`，正则 `(^|\?|&)token=([^(&|/)]*)(&|/|$)`。
+全 LMS 核心 JS 中 `getHashParam("AUTHORIZATION")` / `getUrlParam("AUTHORIZATION")` 命中 **0 次**。
+
+旧实现写的是 `` `${LMS_HOME}?AUTHORIZATION=...` `` —— 参数名错 + 位置错，**前端完全不读**，
+等于没传 token。于是 `checkSession` 的 `init.js` `judgeToken()` 判无效 → logout → 弹回应用中心，
+课程列表请求失败 → 渲染「网络错误，点击重新加载」。
+
+| 写法 | 前端是否落成 AUTHORIZATION cookie |
+|---|---|
+| `#/index/courseList?token=xxx`（hash + `token`） | ✅ 是（实测桩验证） |
+| `?token=xxx`（查询串） | ❌ 否 |
+| `#/index/courseList?AUTHORIZATION=xxx`（旧代码） | ❌ 否 |
+
+#### 根因三：Cookie 是域级共享的
+
+应用中心前端以 `Domain=.dgut.edu.cn` 写 `AUTHORIZATION` / `USER_INFO`，
+lms / auth / application 同域共享。CAS 回跳 `appapi/cas/fromcas` 后
+**必须让应用中心前端真正渲染一次**才会写 cookie；不等它落地就跳 LMS，就还是未登录态。
+
+#### 「网络错误」不是断网
+
+该文案来自 `courseweb/common/nls/public.js` 的 `netError`，是 `/courseapi/*`
+拿不到有效 token 时课程列表渲染的兜底 UI。识别特征：页面同时含「网络错误」与「重新加载」。
+⇒ 必须归类为 `needs_login`，**不能**报成 `network_blocked`。
+
+#### 落地修复（`src/main/sources/ulearning-source.ts`）
+
+1. 登录入口改为应用中心；**任何情况下都不再导航到 `/sld/`**（`resolveLmsLoginTarget()` 有单测）。
+2. 停在 LMS 坏页面时**主动把窗口带走**到应用中心（旧实现只提示"点右上角登录"，而那个按钮正是 404）。
+3. 免密 URL 改为 hash 里的 `token`（`buildLmsTokenUrl()` 有单测）。
+4. 「网络错误」页识别为登录失效（`detectNetworkError()`）。
+5. 无 CAS 票据时**不再空等 90 秒**（原来点登录会卡住 94 秒），改为立即返回。
+6. `app:login` 现在会把 `connect()` 结果写回 store —— 否则 UI 状态永远不刷新。
+
+验证脚本：`node scripts/lms-login-fix-e2e.mjs`（真实 Electron + 真实受控 Edge）。
+
+### 3.10 🟢 2026-11-13 优学院考试接口与交卷状态实测验证
+
+通过 `node scripts/probe-lms-exam.mjs --profile <副本>` 在真实登录态下验证了 6 门课程（18 场考试）：
+
+| 接口 | 状态码 | 实测结论 |
+|---|---|---|
+| `GET /utestapi/exams/student?ocId=<ocId>&pn=1&ps=20&lang=zh` | **200** | ✅ 新分支生效，返回 `{ pn, ps, total, examList: [...] }` |
+| `GET /courseapi/exams/student?ocId=<ocId>&keyword=&pn=1&ps=20&lang=zh` | **400** | ❌ 旧分支在 DGUT 已将 `student` 当成 `{examId}` 转型抛 400 |
+| `GET /utestapi/exams/{id}/score` | **400** | 教师端接口（要求 `examStatus` 参数） |
+| `GET /utestapi/exams/{id}/result` | **500** | 服务端 `NullPointerException`，学生端不可用 |
+
+#### 考试行真实字段与个人交卷状态（脱敏样本：`examId=146063`《3. 组合逻辑电路》）
+
+```json
+{
+  "examId": 146063,
+  "title": "3. 组合逻辑电路",
+  "answerTimes": 1,
+  "limitTimes": 2,
+  "isLimitTimes": "1",
+  "subjective": 30,
+  "objective": 30,
+  "examTime": 180,
+  "examState": 2,
+  "examType": 5,
+  "isInExam": 1,
+  "showExamRecord": 1,
+  "showExamRecodAfterDate": 888,
+  "examFinish": "1;3",
+  "allExamBatchEnd": 0,
+  "examRelationTimeList": [
+    { "startTime": 1793286240000, "endTime": 1793973600000, "examRoomName": null, "seatNo": null },
+    { "startTime": 1794321420000, "endTime": 1794578400000, "examRoomName": null, "seatNo": null }
+  ]
+}
+```
+
+| 字段 | 实测类型与取值 | 语义（对照 `utest` 与 `nls/exam.js`） |
+|---|---|---|
+| `answerTimes` | `number`（实测 `0`, `1`, `2`） | **已用提交次数**（`usedTimesNew: "已用提交次数"`）：`0` = 未交卷，`>= 1` = 已交卷 |
+| `limitTimes` + `isLimitTimes` | `number` + `"0" \| "1"` | **允许提交次数**（`isLimitTimes="0"` 或 `limitTimes=0` 表示不限次数） |
+| `subjective` / `objective` | `number \| null` | 主观题 / 客观题得分；未交卷时恒为 `null`，已交卷时可求和为总分 |
+| `examState` | `1` / `2` / `3` | 考试级状态（未开始 / 进行中 / 已结束），不代表个人是否交卷 |
+| `examRelationTimeList[]` | `{ startTime, endTime, examRoomName, seatNo }[]` | 场次毫秒时间戳列表 |
+
+**判定规则（已落地 `resolveExamAttendance()`）**：
+- `answerTimes >= 1` ⇒ `attendance = 'submitted'`（显示「已交卷 X/Y」或「已交卷 X次」，悬停显示得分，并抑制后续考试提醒）；
+- `answerTimes === 0` ⇒ `attendance = 'not_submitted'`（显示「未交卷 0/Y」或「未交卷」）；
+- `answerTimes` 缺失或非有效非负数值 ⇒ 保守回退 `attendance = 'unknown'`（显示「参加状态未知」）。
+
 
 ---
 
@@ -277,6 +403,11 @@ https://auth.dgut.edu.cn/authserver/login
 6. **LMS 适配器诚实降级**
    `UlearningAssignmentSource.listAssignments()` 在拿到课程后会抛 `UnverifiedEndpointError`，
    明确表示"接口未验证，不返回伪造数据"，而不是返回空数组。
+
+7. **LMS 登录只有一条可行链路**（2026-11-11 修复，见 §3.9）
+   `应用中心(#/login) → CAS → 应用中心(渲染落 cookie, Domain=.dgut.edu.cn) → LMS(hash ?token=)`。
+   `/sld/pc.html` 已永久 404，**代码中不得再出现该路径作为导航目标**
+   （`resolveLmsLoginTarget()` 单测会拦住）。
 
 ---
 

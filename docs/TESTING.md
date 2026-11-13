@@ -414,20 +414,27 @@ hw:9001:2026-11-08T05:37:00+08:00:72
 
 应用内「设置 → 平台诊断」可逐段检查接入链路，精确报告卡在哪一步。
 
+> **2026-11-11 已更新**：优学院自身登录页 `/sld/pc.html` 经复核是**永久下线**（不是临时故障），
+> 诊断不再把它当作阻塞项，改为检查「应用中心入口是否可达」+「token 是否经官方接口校验有效」。
+> 详见 §13 与 `docs/PLATFORM_FINDINGS.md` §3.9。
+
 实测输出（优学院，未登录状态）：
 
 | 状态 | 检查项 | 实测结果 |
 |---|---|---|
-| 异常 | 优学院自身登录入口（`/sld/pc.html`） | HTTP 404 —— 该地址已失效 |
+| 正常 | 应用中心登录入口（`application.dgut.edu.cn`） | HTTP 200 —— 可用（附注：旧登录页 `/sld/pc.html` 已 404，勿用） |
 | 待进行 | 莞工中央认证 | 尚未访问（点击「登录」后自动打开） |
 | 异常 | 中央认证授权票据 | 未签发 —— 需完成登录 |
-| 异常 | 优学院会话校验 | HTTP 401，业务码 2001 |
+| 异常 | 优学院会话校验 | HTTP 401，业务码 2001（跨域时明确说明"被浏览器拦截"，不伪装成平台故障） |
 | 异常 | 优学院作业接口 | 尚未真机验证 |
 
-结论明确告知用户：`优学院自身登录页返回 404（平台故障，非本应用问题）`。
+**设计要点**：
+- 先用真实 API 响应判定，不依赖 `document.cookie`；
+- "尚未访问中央认证"标为**中性状态（待进行）**而非异常，避免误导；
+- **token 存在 ≠ token 有效**：经 `GET /courseapi/users/isValidToken/<token>` 校验，
+  失效时明确告知"登录已失效（这就是「网络错误」页的成因），不是断网"；
+- 浏览器上下文已关闭时也**必须**返回可读结论（不能整体抛错）。
 
-**设计要点**：先用真实 API 响应判定，不依赖 `document.cookie`；
-"尚未访问中央认证"标为**中性状态（待进行）**而非异常，避免误导。
 截图：`docs/screenshots/diagnostic-panel.png`
 
 ### 11.9 Windows 通知的客观状态
@@ -454,8 +461,79 @@ hw:9001:2026-11-08T05:37:00+08:00:72
 | Windows Toast 肉眼可见 | ⚠️ | **受系统勿扰模式阻塞**，需用户关闭勿扰 |
 | 真实重启验证开机自启 | ⚠️ | 注册表已客观验证，但未重启 |
 | 真实休眠/唤醒 | ⚠️ | 补偿逻辑已验证，但未真实休眠 |
-| LMS 端到端登录 | ⏳ | 路径已破解，等用户完成认证 |
+| LMS 端到端登录 | ⏳ | 路径已破解并修复，等用户完成认证 |
 | 代码签名 | ❌ | 无证书，SmartScreen 会提示 |
+
+
+---
+
+## 13. 2026-11-11 LMS 登录跳转修复验证
+
+**背景**：用户报告两个 bug —— 点「立即同步」后受控 Edge 停在 LMS 课程列表显示
+「网络错误，点击重新加载」；点「登录」后打开 `/sld/pc.html#/login` 得到 nginx 404。
+
+### 13.1 真实平台探测（只读 GET，无凭证）
+
+| 探测 | 结果 |
+|---|---|
+| `GET /sld/pc.html` | **404**（nginx，整目录已下线） |
+| `GET /courseweb/ulearning/index.html` | 200 |
+| `GET /ulearning/tip/timeout.html` | 200（LMS 官方会话失效页） |
+| `GET /courseapi/users/isValidToken/<假token>` | 200，裸响应 `false` |
+| `GET /organization/index.html` | 301 → `https://application.dgut.edu.cn/#/portal` |
+| `GET /courseapi/courses/students`（无 token） | 401 |
+| `GET https://application.dgut.edu.cn/#/login` | 200，页面含「校园统一身份认证登录」 |
+
+**未登录时 LMS 实际导航轨迹**（浏览器实测）：
+```
+#/index/courseList → /ulearning/tip/timeout.html → / → application.dgut.edu.cn/#/portal
+```
+
+### 13.2 免密参数写法对照（本地桩，不含任何真实凭证）
+
+用桩替换 `/courseapi/*` 阻止无效 token 触发的 logout 重定向，观测前端是否把参数落成 cookie：
+
+| URL 写法 | 前端落成 `AUTHORIZATION` cookie |
+|---|---|
+| `#/index/courseList?token=xxx` | ✅ **是**（新实现采用） |
+| `?token=xxx`（查询串） | ❌ 否 |
+| `#/index/courseList?AUTHORIZATION=xxx` | ❌ 否（**旧实现，即 bug 根因**） |
+
+结论与 `init.js` 源码一致：`var token = getHashParam("token")`。
+
+### 13.3 端到端（`node scripts/lms-login-fix-e2e.mjs`）
+
+真实 Electron + 真实受控 Edge + 隔离 profile（未登录态）。**结果：PASS**
+
+| 检查 | 结果 |
+|---|---|
+| `login('ulearning')` 不抛错 | ✅ |
+| 返回会话状态为明确值（非 error） | ✅ `needs_login` |
+| 不再把人留在坏的 LMS 页面 | ✅ |
+| 诊断中 `/sld` 步骤已移除 | ✅ |
+| 诊断包含「应用中心入口」步骤 | ✅ |
+| 受控 Edge 确实被拉起 | ✅ 8 个进程 |
+| **点登录耗时** | ✅ **3.7–4.1 秒**（修复前 94 秒） |
+
+修复前该脚本的 `login` 耗时 **94,185 ms** 且 `state: none`（因为 `app:login` 丢弃了
+`connect()` 的返回值，UI 状态永不刷新）。
+
+### 13.4 单元测试
+
+| 文件 | 覆盖 |
+|---|---|
+| `ulearning-source.test.ts` | 登录入口永不为 `/sld/`；停在 LMS 时带去应用中心；CAS 页不打断；`token` 必须在 hash 段；token 编码 |
+| `lms-diagnostic.test.ts` | 结论口径（失效≠断网、未登录引导登录）；浏览器已关闭时不抛错 |
+
+`npm test`：**15 文件 / 369 项全部通过**；`npm run typecheck`、`npm run build` 通过。
+
+### 13.5 未覆盖（明确声明）
+
+- **真实已登录会话下的完整换票**：本次验证环境均无有效账号，只验证了
+  "不再跳到坏页面"「参数写法正确」「浏览器被拉起」「诊断口径正确」。
+  最后一公里（CAS 成功后 LMS 课程列表真的出数据）需用户实际登录确认。
+- 应用中心页面上「点图标进优学院」的模拟点击未实现 —— 域级 cookie 共享，
+  通常直接 `goto` LMS 即可，无需点击。
 
 
 ---
@@ -498,3 +576,12 @@ node scripts/e2e-ui.mjs
 - 人工验收：`npm start` 启动本次构建；设置中切换三种主题，缩放窗口并检查长标题/标签；验证真实登录、同步和打开作业。真实平台、系统 DPI、通知、安装包不在此次 UI 自动化验证范围内。
 - 当前工作目录无 Git 元数据；未初始化仓库、Commit 或 Push，等待用户人工验收。
 - DSH 按用户授权完成一次源码建议与一次独立源码审查，最终结论「通过，未发现阻塞性问题」；Codex 已查看深色、浅色、窄窗口表格和设置页截图。非阻塞建议为启动窗口底色一致性与后续增加手动修正/真实来源徽标测试覆盖，本次不扩大范围。
+
+## 14. 2026-11-13 优学院考试交卷状态实测验证与 TDD 接入
+
+- **真实平台探针验证**：在已登录优学院 profile 副本上运行 `node scripts/probe-lms-exam.mjs --profile <副本> --oc-id 161631`，拿到 `/utestapi/exams/student` HTTP 200 真实响应，确认 `answerTimes`（已用提交次数）、`limitTimes`（允许提交次数）、`isLimitTimes`（`"0"` 不限 / `"1"` 限制）、`subjective`/`objective`（主客观题得分）字段结构与值域。
+- **TDD 三切面验证**：
+  1. `src/main/sources/lms-exam.test.ts`：`resolveExamAttendance` / `normalizeExamItems` 对实测《3. 组合逻辑电路》（`answerTimes=1, limitTimes=2, score=60`）、《4. 时序逻辑电路》（`answerTimes=0, limitTimes=1`）、不限次数测验（`isLimitTimes="0"`）及缺字段回退 `unknown` 的归一化验证。
+  2. `src/renderer/src/logic/item-view.test.ts`：`attendanceBadge` 显示「已交卷 X/Y」「已交卷 X次」「未交卷 0/Y」「未交卷」与悬停得分说明。
+  3. `src/renderer/src/logic/filter.test.ts` + `src/main/reminder/exam-planner.test.ts`：按 `submitted` / `not_submitted` / `unknown` 筛选考试场次；已交过 1 次卷（`attendance='submitted'`）的考试自动抑制后续提醒。
+- **全量检查**：`npm run typecheck`、`npm test`（15 文件 / 383 项通过）、`npm run build`、`node scripts/exam-e2e.mjs` 通过。

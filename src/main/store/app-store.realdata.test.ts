@@ -47,8 +47,12 @@ describe('真实 store 副本迁移（本机有数据时）', () => {
     for (let i = 0; i < ul.length; i++) {
       expect(ul[i]!.title).toBe((before.assignments.ulearning as Array<{ title: string }>)[i]!.title);
     }
-    // 考试缓存为空（尚未同步过）
-    expect(store.getAllExamItems()).toEqual([]);
+    // 考试缓存：有就保留、没有就为空 —— 断言「迁移不改变它」，而不是断言「它必须是空的」。
+    // （2026-11-12：用户真实同步出考试后，原来写死「考试缓存为空」会误报失败。）
+    const beforeExam = (before.exams?.ulearning ?? []).length;
+    expect(store.getAllExamItems()).toHaveLength(beforeExam);
+    // 考试条目必须带上判别字段，否则渲染层无法收窄
+    expect(store.getAllExamItems().every((x) => x.kind === 'exam')).toBe(true);
     // 新设置项就位
     expect(store.getSettings().examThresholds.length).toBe(4);
     // 真实 store 是 v2（没有 examSyncEnabled 字段），迁移应补成默认的 true

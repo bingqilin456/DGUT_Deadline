@@ -231,7 +231,10 @@ function registerIpc(): void {
     const src = sources.get(source);
     if (src) {
       // 打开受控浏览器让用户手工登录；不代填任何凭证
-      await src.connect();
+      const status = await src.connect();
+      // 【关键】必须把会话状态写进 store，否则 UI 顶栏/「登录」按钮永远停在旧状态，
+      // 用户点完登录看不到任何反馈（表现为"点了没反应"）。
+      store.markSession(source, status);
       if (mainWindow) mainWindow.show();
       await broadcast();
     }

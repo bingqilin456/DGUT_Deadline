@@ -109,10 +109,11 @@ const stats = computed(() => {
   });
   const submitted = list.filter((a) => a.kind === 'homework' && a.submissionStatus === 'submitted');
 
-  // 考试卡：7 天内开考 + 进行中（由本地时间推导，不依赖未验证的 examState）。
+  // 考试卡：7 天内开考 + 进行中（仅统计未交卷/未知状态的待考场次）。
   const exams = list.filter((a) => a.kind === 'exam');
   const examsSoon = exams.filter((a) => {
     if (a.kind !== 'exam') return false;
+    if (a.attendance === 'submitted') return false;
     const phase = examPhase(a, now);
     if (phase === 'ongoing') return true;
     if (phase !== 'upcoming') return false;
@@ -230,7 +231,7 @@ onUnmounted(() => {
         <template v-if="tab === 'list'">
           <div class="section-heading">
             <h1>任务概览</h1>
-            <span>作业按截止时间、考试按开考时间统一排序</span>
+            <span>按结束时间统一排序（作业看截止、考试看结束）</span>
           </div>
           <div class="stats stats-4">
             <div class="stat pending">
@@ -291,7 +292,7 @@ onUnmounted(() => {
                 <br />
                 若同步失败，本应用不会把失败显示成"没有作业/没有考试"。
                 <br />
-                考试同步默认关闭（接口未用真实响应验证），可在设置中开启。
+                考试同步默认开启（接口未经真实响应验证，失败会明确提示），可在设置中关闭。
               </div>
             </div>
           </div>

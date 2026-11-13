@@ -63,16 +63,10 @@ const KIND_TABS = [
   { value: 'exam', label: '考试' },
 ] as const;
 
-/**
- * 切换到「考试」Tab 时，若当前状态筛选是作业专有语义（未提交/已提交），
- * 自动回退到「全部」—— 否则用户会看到空列表，误以为没有考试。
- */
 function setKind(v: FilterState['kind']): void {
-  const examOnlySemantics = v === 'exam' && (props.filter.status === 'not_submitted' || props.filter.status === 'submitted');
-  patch({ kind: v, ...(examOnlySemantics ? { status: 'all' as const } : {}) });
+  patch({ kind: v });
 }
 
-/** 作业专有的状态项在「考试」Tab 下必须置灰：考试没有提交状态。 */
 const examTabActive = computed(() => props.filter.kind === 'exam');
 </script>
 
@@ -143,8 +137,8 @@ const examTabActive = computed(() => props.filter.kind === 'exam');
         <span>状态</span>
         <select :value="filter.status" @change="patch({ status: ($event.target as HTMLSelectElement).value as FilterState['status'] })">
           <option value="all">全部</option>
-          <option value="not_submitted" :disabled="examTabActive" :title="examTabActive ? '考试没有提交状态，平台未提供可信字段' : undefined">未提交</option>
-          <option value="submitted" :disabled="examTabActive" :title="examTabActive ? '考试没有提交状态，平台未提供可信字段' : undefined">已提交</option>
+          <option value="not_submitted">{{ examTabActive ? '未交卷' : '未提交' }}</option>
+          <option value="submitted">{{ examTabActive ? '已交卷' : '已提交' }}</option>
           <option value="unknown">状态待确认 / 参加状态未知</option>
           <option value="overdue">{{ examTabActive ? '已结束' : '已过期' }}</option>
         </select>

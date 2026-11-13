@@ -41,13 +41,18 @@
 
 ### 优学院 LMS
 
-比 hw 复杂得多，共三个坑（详见 [PLATFORM_FINDINGS §3](docs/PLATFORM_FINDINGS.md)）：
+比 hw 复杂得多，共四个坑（详见 [PLATFORM_FINDINGS §3.9](docs/PLATFORM_FINDINGS.md)）：
 
-1. **登录入口已损坏**：`/sld/pc.html` 返回 404
+1. **登录入口只剩应用中心**：`/sld/pc.html` 整目录**已永久 404**
+   → 只能走 `application.dgut.edu.cn/#/login`
 2. **CAS 的 service 必须指向应用中心** `application.dgut.edu.cn/appapi/cas/fromcas`
    （认证中心只信任来自应用中心的请求）
-3. **API 必须带 `Authorization` 请求头**（值取自 `AUTHORIZATION` cookie）+ `version: 1`
+3. **免密参数是 hash 里的 `token`**，不是 `AUTHORIZATION`：
+   `…/index.html#/index/courseList?token=<AUTHORIZATION>`（`init.js` 用 `getHashParam("token")`）
+4. **API 必须带 `Authorization` 请求头**（值取自 `AUTHORIZATION` cookie）+ `version: 1`
    只带 cookie 会返回 `{"code":2001,"message":"缺少访问token"}`
+
+> 页面出现「**网络错误，点击重新加载**」不是断网，是登录 token 失效时的兜底 UI —— 重新登录即可。
 
 另外两个参数陷阱：作业接口参数是 **`ocId`** 不是 `courseId`；
 课程接口 `ps=1` 会让服务端 500。

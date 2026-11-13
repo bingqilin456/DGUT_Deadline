@@ -422,22 +422,28 @@ describe('状态筛选对考试行', () => {
   const list: UiAssignment[] = [
     mk({ id: 'h-sub', submissionStatus: 'submitted' }),
     mk({ id: 'h-not', submissionStatus: 'not_submitted' }),
-    mkExam({ id: 'x-1' }),
+    mkExam({ id: 'x-unk', attendance: 'unknown' }),
+    mkExam({ id: 'x-sub', attendance: 'submitted', answerTimes: 1, limitTimes: 2 }),
+    mkExam({ id: 'x-not', attendance: 'not_submitted', answerTimes: 0, limitTimes: 1 }),
     mkExam({ id: 'x-ended', startsAt: new Date(NOW - 3 * HOUR).toISOString(), endsAt: new Date(NOW - HOUR).toISOString() }),
   ];
 
-  it('status=submitted 不匹配任何考试行', () => {
+  it('status=submitted 命中已提交的作业与已交卷（attendance=submitted）的考试', () => {
     const r = applyFilter(list, f({ status: 'submitted', hideExpired: false }), NOW);
-    expect(ids(r)).toEqual(['h-sub']);
+    expect(ids(r).sort()).toEqual(['h-sub', 'x-sub']);
   });
 
-  it('status=not_submitted 不匹配任何考试行', () => {
+  it('status=not_submitted 命中未提交的作业与未交卷（attendance=not_submitted）的考试', () => {
     const r = applyFilter(list, f({ status: 'not_submitted', hideExpired: false }), NOW);
-    expect(ids(r)).toEqual(['h-not']);
+    expect(ids(r).sort()).toEqual(['h-not', 'x-not']);
   });
 
-  it('status=unknown 命中考试（参加状态恒未知）与状态未知的作业', () => {
-    const withUnknown: UiAssignment[] = [mk({ id: 'h-unk', submissionStatus: 'unknown' }), mkExam({ id: 'x-2' })];
+  it('status=unknown 命中参加状态未知的考试与状态未知的作业', () => {
+    const withUnknown: UiAssignment[] = [
+      mk({ id: 'h-unk', submissionStatus: 'unknown' }),
+      mkExam({ id: 'x-2', attendance: 'unknown' }),
+      mkExam({ id: 'x-sub', attendance: 'submitted' }),
+    ];
     expect(ids(applyFilter(withUnknown, f({ status: 'unknown' }), NOW)).sort()).toEqual(['h-unk', 'x-2']);
   });
 
@@ -454,8 +460,8 @@ describe('状态筛选对考试行', () => {
   });
 });
 
-describe('混合排序（统一锚点）', () => {
-  it('作业按 dueAt、考试按 startsAt 混排', () => {
+describe('混合排序（统一按结束时刻）', () => {
+  it('作业按 dueAt、考试按 endsAt 混排', () => {
     const list: UiAssignment[] = [
       mk({ id: 'hw-3d', dueAt: new Date(NOW + 3 * DAY).toISOString() }),
       mkExam({ id: 'ex-1d', startsAt: new Date(NOW + DAY).toISOString(), endsAt: new Date(NOW + DAY + HOUR).toISOString() }),
@@ -465,7 +471,52 @@ describe('混合排序（统一锚点）', () => {
     expect(ids(sortList(list, 'dueAsc', NOW))).toEqual(['hw-5h', 'ex-1d', 'ex-2d', 'hw-3d']);
   });
 
-  it('无锚点的考试置底', () => {
+  /**
+   * 2026-11-12 用户反馈的 bug：
+   * 考试按**开考时间**排序，导致「开考早、结束晚」的考试排在「结束早」的前面。
+   * 截图里就是：开考 11/2 结束 12/13 的排在最前，而结束 11/14 的排在后面。
+   */
+  it('考试按结束时间排，不按开考时间（用户报告的 bug）', () => {
+    const list: UiAssignment[] = [
+      // 开考早但结束晚 —— 旧实现会把它排第一（错）
+      mkExam({
+        id: 'ex-long',
+        startsAt: new Date(NOW - 20 * DAY).toISOString(),
+        endsAt: new Date(NOW + 31 * DAY).toISOString(),
+      }),
+      // 开考晚但马上就要结束 —— 必须排第一
+      mkExam({
+        id: 'ex-soon',
+        startsAt: new Date(NOW - 1 * DAY).toISOString(),
+        endsAt: new Date(NOW + 1 * DAY).toISOString(),
+      }),
+      mkExam({
+        id: 'ex-mid',
+        startsAt: new Date(NOW - 5 * DAY).toISOString(),
+        endsAt: new Date(NOW + 3 * DAY).toISOString(),
+      }),
+    ];
+    expect(ids(sortList(list, 'dueAsc', NOW))).toEqual(['ex-soon', 'ex-mid', 'ex-long']);
+  });
+
+  it('dueDesc 也按结束时间倒序', () => {
+    const list: UiAssignment[] = [
+      mkExam({ id: 'a', startsAt: new Date(NOW + DAY).toISOString(), endsAt: new Date(NOW + 2 * DAY).toISOString() }),
+      mkExam({ id: 'b', startsAt: new Date(NOW + 5 * DAY).toISOString(), endsAt: new Date(NOW + 6 * DAY).toISOString() }),
+    ];
+    expect(ids(sortList(list, 'dueDesc', NOW))).toEqual(['b', 'a']);
+  });
+
+  it('考试缺 endsAt 时退化用 startsAt 排序（不扔到最后）', () => {
+    const list: UiAssignment[] = [
+      mkExam({ id: 'no-end', startsAt: new Date(NOW + HOUR).toISOString(), endsAt: null }),
+      mkExam({ id: 'has-end', startsAt: new Date(NOW + 5 * DAY).toISOString(), endsAt: new Date(NOW + 5 * DAY).toISOString() }),
+    ];
+    // no-end 的结束时刻视为 startsAt（NOW+1h），应排在 has-end（+5d）之前
+    expect(ids(sortList(list, 'dueAsc', NOW))).toEqual(['no-end', 'has-end']);
+  });
+
+  it('无任何时间的考试置底', () => {
     const list: UiAssignment[] = [
       mkExam({ id: 'ex-nostart', startsAt: null, endsAt: null, timePrecision: 'none' }),
       mk({ id: 'hw-1d', dueAt: new Date(NOW + DAY).toISOString() }),

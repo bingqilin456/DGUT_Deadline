@@ -233,12 +233,76 @@ describe('statusCell —— 状态文案红线', () => {
 });
 
 describe('attendanceBadge', () => {
-  it('考试显示「参加状态未知」并解释原因', () => {
+  it('已交卷且有限制次数与分数（如《3. 组合逻辑电路》1/2, 60分）=> 显示「已交卷 1/2」且悬停含得分', () => {
+    const b = attendanceBadge(
+      exam({
+        attendance: 'submitted',
+        answerTimes: 1,
+        limitTimes: 2,
+        score: 60,
+        attendanceEvidence: 'answerTimes=1 limitTimes=2 score=60',
+      }),
+    );
+    expect(b).toEqual({
+      text: '已交卷 1/2',
+      cls: 'ok',
+      title: '得分：60 分（answerTimes=1 limitTimes=2 score=60）',
+    });
+  });
+
+  it('已交卷但不限次数（limitTimes=null）=> 显示「已交卷 N次」', () => {
+    const b = attendanceBadge(
+      exam({
+        attendance: 'submitted',
+        answerTimes: 1,
+        limitTimes: null,
+        score: 90,
+        attendanceEvidence: 'answerTimes=1 limitTimes=unlimited score=90',
+      }),
+    );
+    expect(b?.text).toBe('已交卷 1次');
+    expect(b?.cls).toBe('ok');
+    expect(b?.title).toContain('90 分');
+  });
+
+  it('未交卷且有限制次数 => 显示「未交卷 0/1」', () => {
+    const b = attendanceBadge(
+      exam({
+        attendance: 'not_submitted',
+        answerTimes: 0,
+        limitTimes: 1,
+        score: null,
+        attendanceEvidence: 'answerTimes=0 limitTimes=1',
+      }),
+    );
+    expect(b).toEqual({
+      text: '未交卷 0/1',
+      cls: 'warn',
+      title: '尚未交卷（answerTimes=0 limitTimes=1）',
+    });
+  });
+
+  it('未交卷且不限次数 => 显示「未交卷」', () => {
+    const b = attendanceBadge(
+      exam({
+        attendance: 'not_submitted',
+        answerTimes: 0,
+        limitTimes: null,
+        score: null,
+        attendanceEvidence: 'answerTimes=0 limitTimes=unlimited',
+      }),
+    );
+    expect(b?.text).toBe('未交卷');
+    expect(b?.cls).toBe('warn');
+  });
+
+  it('未知状态显示「参加状态未知」并解释原因', () => {
     const b = attendanceBadge(exam());
     expect(b?.text).toBe('参加状态未知');
     expect(b?.title).toContain('不做推断');
     expect(b?.text).not.toContain('未参加');
   });
+
   it('作业没有参加状态徽标', () => {
     expect(attendanceBadge(hw())).toBeNull();
   });
