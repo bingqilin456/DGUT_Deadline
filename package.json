@@ -1,6 +1,6 @@
 {
   "name": "dgut-deadline",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "莞工 Deadline —— 东莞理工学院作业截止提醒桌面应用（本地优先，不接 AI/云服务）",
   "type": "module",
