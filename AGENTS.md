@@ -99,6 +99,21 @@ node scripts/probe-lms-exam.mjs  # 只读探针：拿考试列表真实响应形
 > 实际是环境污染。启动 Electron 的脚本必须 **`delete env.ELECTRON_RUN_AS_NODE`**（删除键，
 > 不是设为 `''`）。
 
+### 一键启动（已处理上述污染）
+
+双击仓库根目录的：
+
+| 文件 | 模式 | 用途 |
+|---|---|---|
+| `启动.cmd` | `npm run dev`（含热更新） | 开发调试用 |
+| `快速启动.cmd` | `npx electron .`（跑 `out/` 预构建） | 日常使用，启动更快 |
+
+两者都会自行清理 `NODE_OPTIONS` / `ELECTRON_RUN_AS_NODE`，因此从资源管理器、
+快捷方式、任何 shell 启动都不会踩坑。桌面已创建快捷方式「莞工 Deadline」→ `快速启动.cmd`。
+
+> `.cmd` 内容刻意保持**纯 ASCII**：中文注释在 `chcp 65001` 生效前就已被 GBK 解析，
+> 会整行乱码并导致 `rem` 之后的行被当成命令执行。
+
 ## 7. 修改适配器时必须做的事
 
 1. 先在真实平台上确认字段（截图 / 脱敏响应结构），把结论写进 `docs/PLATFORM_FINDINGS.md`。
@@ -125,13 +140,11 @@ DGUT 优学院是**单主机 + 路径前缀**，不是「一子系统一子域�
 
 - ✅ hw 平台：真实登录后读取作业，归一化正确（已验证 14 / 20 条两个批次）
 - ✅ 优学院 LMS **作业**：`/courseapi/homeworks/student/v2?ocId=`，真实读取 121 条
-- 🟡 优学院 LMS **考试**：接口与归一化代码已完成，但**真实响应从未拿到**
-  （会话 `needs_login`，`/courseapi|utestapi/exams/student` 均 401 `{code:2001}`）。
-  `settings.examSyncEnabled` **默认开启**（用户 2026-11-11 决策），因此同步时会真实请求考试接口；
-  适配器对「容器识别不了 / 会话失效」必须抛错 → 归类为 `failed` → UI 显示「考试同步失败」，
-  **绝不返回空数组**伪装成"没有考试"。用户可在设置里关闭。
-  证据见 `investigation/lms/exam-evidence.md`，计划见 `docs/LMS-EXAM-PLAN.md`。
-  拿到真实响应后跑 `node scripts/probe-lms-exam.mjs --profile <profile副本>` 定字段。
+- ✅ 优学院 LMS **考试**：`/utestapi/exams/student?ocId=`（2026-11-13 已用真实登录态验证 6 门课 18 场考试）。
+  个人交卷状态由 `answerTimes`（已用提交次数）与 `limitTimes`（允许提交次数）判定：
+  `answerTimes >= 1` 为 `submitted`（显示「已交卷 X/Y」，悬停可见 `subjective + objective` 得分，并抑制后续提醒），
+  `answerTimes === 0` 为 `not_submitted`（显示「未交卷 0/Y」），字段缺失时保守置 `unknown`（显示「参加状态未知」）。
+  证据见 `investigation/lms/exam-probe-result.json` 与 `docs/PLATFORM_FINDINGS.md` §3.10。
 - ⏳ 提醒引擎、托盘、系统通知：代码骨架已就绪，**尚未做实机验证**。
 - ⏳ NSIS 安装包：**尚未制作**。
 

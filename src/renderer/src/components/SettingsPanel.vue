@@ -241,8 +241,9 @@ function setRetention(e: Event): void {
       </div>
 
       <p class="exam-caveat">
-        考试参加状态：<b>平台未提供可信字段，本应用不做推断</b>。列表中该列固定显示「参加状态未知」，
-        不会出现「未参加」「未提交」「已提交」。
+        考试交卷状态：由优学院考试接口的 <code>answerTimes</code>（已用提交次数）与
+        <code>limitTimes</code>（允许提交次数）读取，列表显示「已交卷 X/Y」或「未交卷 0/Y」（悬停可看得分），
+        <b>已交过 1 次即视为完成并停止后续提醒</b>；字段缺失时保守显示「参加状态未知」。
       </p>
 
       <table class="threshold-table exam-threshold-table">

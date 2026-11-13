@@ -185,9 +185,19 @@ describe('考试提醒 —— 无时不猜', () => {
     expect(out).toHaveLength(0);
   });
 
-  it('参加状态恒 unknown 也绝不抑制提醒（漏考比多提醒严重）', () => {
-    const out = planReminders([mkExam({ attendance: 'unknown' })], mkCtx());
-    expect(out.length).toBeGreaterThan(0);
+  it('参加状态 unknown 或 not_submitted 绝不抑制提醒（漏考比多提醒严重）', () => {
+    const outUnknown = planReminders([mkExam({ attendance: 'unknown' })], mkCtx());
+    const outNotSubmitted = planReminders([mkExam({ attendance: 'not_submitted', answerTimes: 0 })], mkCtx());
+    expect(outUnknown.length).toBeGreaterThan(0);
+    expect(outNotSubmitted.length).toBeGreaterThan(0);
+  });
+
+  it('已交过卷（attendance=submitted，哪怕允许多次只交了 1 次）抑制考试提醒', () => {
+    const out = planReminders(
+      [mkExam({ attendance: 'submitted', answerTimes: 1, limitTimes: 2, score: 60 })],
+      mkCtx({ nowMs: at(`2026-11-13T12:00:00${TZ}`) }),
+    );
+    expect(out).toHaveLength(0);
   });
 });
 

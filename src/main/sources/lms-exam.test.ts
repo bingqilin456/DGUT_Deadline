@@ -261,28 +261,99 @@ describe('normalizeExamItems —— 空场次 / 缺字段的兜底', () => {
   });
 });
 
-describe('normalizeExamItems —— attendance 恒为 unknown（红线 3）', () => {
-  it('即使响应里带 answerTimes/examState/examFinish，也绝不推断参加状态', () => {
-    // 合成夹具刻意塞入所有"看起来像状态"的字段（这些字段名来自代码证据，未验证）
+describe('normalizeExamItems —— 个人交卷状态（2026-11-13 /utestapi/exams/student 实测响应）', () => {
+  it('answerTimes >= 1 且有允许次数与得分（实测《3. 组合逻辑电路》形状）=> submitted + 次数 + 总分', () => {
     const row = mkRow({
-      answerTimes: 3,
-      limitTimes: '5',
-      examState: 3,
-      examFinish: '1;2;3',
-      isInExam: false,
-      isTooLate: true,
-      showExamRecord: 1,
-      allExamBatchEnd: true,
-      publishStatus: 0,
+      examId: 146063,
+      title: '3. 组合逻辑电路',
+      answerTimes: 1,
+      limitTimes: 2,
+      isLimitTimes: '1',
+      subjective: 30,
+      objective: 30,
+      examState: 2,
+      isInExam: 1,
+      examFinish: '1;3',
     });
     const r = normalizeExamItems(COURSE, [row], SYNC_AT);
     expect(r.items.length).toBeGreaterThan(0);
     for (const x of r.items) {
-      expect(x.attendance).toBe('unknown');
-      // 类型层面 ExamItem 上不存在 submissionStatus ⇒ 这里断言运行期也不会有
+      expect(x.attendance).toBe('submitted');
+      expect(x.answerTimes).toBe(1);
+      expect(x.limitTimes).toBe(2);
+      expect(x.score).toBe(60);
       expect('submissionStatus' in x).toBe(false);
-      expect('attendanceEvidence' in x).toBe(true);
-      expect(x.attendanceEvidence).toContain('不做推断');
+      expect(x.attendanceEvidence).toContain('answerTimes=1');
+      expect(x.attendanceEvidence).toContain('limitTimes=2');
+      expect(x.attendanceEvidence).toContain('score=60');
+    }
+  });
+
+  it('answerTimes === 0 且有限制次数（实测《4. 时序逻辑电路》形状）=> not_submitted + 0/1 + score=null', () => {
+    const row = mkRow({
+      examId: 146117,
+      title: '4. 时序逻辑电路',
+      answerTimes: 0,
+      limitTimes: 1,
+      isLimitTimes: '1',
+      subjective: null,
+      objective: null,
+      examState: 2,
+      isInExam: 1,
+    });
+    const r = normalizeExamItems(COURSE, [row], SYNC_AT);
+    for (const x of r.items) {
+      expect(x.attendance).toBe('not_submitted');
+      expect(x.answerTimes).toBe(0);
+      expect(x.limitTimes).toBe(1);
+      expect(x.score).toBeNull();
+      expect(x.attendanceEvidence).toContain('answerTimes=0');
+    }
+  });
+
+  it('isLimitTimes="0" 不限次数（实测《第一章测试》《第七章测试》形状）=> limitTimes=null', () => {
+    const submittedUnlimited = mkRow({
+      examId: 145425,
+      title: '第一章测试',
+      answerTimes: 1,
+      limitTimes: 0,
+      isLimitTimes: '0',
+      subjective: 0,
+      objective: 90,
+    });
+    const unsubmittedUnlimited = mkRow({
+      examId: 146180,
+      title: '第七章测试',
+      answerTimes: 0,
+      limitTimes: 0,
+      isLimitTimes: '0',
+      subjective: null,
+      objective: null,
+    });
+    const r = normalizeExamItems(COURSE, [submittedUnlimited, unsubmittedUnlimited], SYNC_AT);
+    const sub = r.items.find((i) => i.examId === '145425')!;
+    const unsub = r.items.find((i) => i.examId === '146180')!;
+    expect(sub.attendance).toBe('submitted');
+    expect(sub.answerTimes).toBe(1);
+    expect(sub.limitTimes).toBeNull();
+    expect(sub.score).toBe(90);
+    expect(unsub.attendance).toBe('not_submitted');
+    expect(unsub.answerTimes).toBe(0);
+    expect(unsub.limitTimes).toBeNull();
+    expect(unsub.score).toBeNull();
+  });
+
+  it('answerTimes 缺失或非数字时保守降级为 unknown（红线 3：不猜状态，也不看 examState）', () => {
+    const row = mkRow({
+      examState: 3, // 即使考试已结束，缺少 answerTimes 也绝不能当成已交卷或未交卷
+      examFinish: '1;2;3',
+    });
+    const r = normalizeExamItems(COURSE, [row], SYNC_AT);
+    for (const x of r.items) {
+      expect(x.attendance).toBe('unknown');
+      expect(x.answerTimes).toBeNull();
+      expect(x.limitTimes).toBeNull();
+      expect(x.score).toBeNull();
     }
   });
 });

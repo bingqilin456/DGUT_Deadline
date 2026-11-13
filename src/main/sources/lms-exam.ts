@@ -61,6 +61,16 @@ export interface LmsExamRow {
   startTime?: unknown;
   /** 未验证：考试级结束时间（`:112`）。同上，不用于锚点。 */
   endTime?: unknown;
+  /** 2026-11-13 实测验证：已用提交次数（0=未交卷，>=1=已交卷）。 */
+  answerTimes?: unknown;
+  /** 2026-11-13 实测验证：允许提交次数（配合 isLimitTimes）。 */
+  limitTimes?: unknown;
+  /** 2026-11-13 实测验证："0"=不限次数，"1"=限制次数。 */
+  isLimitTimes?: unknown;
+  /** 2026-11-13 实测验证：主观题得分（未交卷时为 null）。 */
+  subjective?: unknown;
+  /** 2026-11-13 实测验证：客观题得分（未交卷时为 null）。 */
+  objective?: unknown;
   /** 未验证：场次列表（`:172-178` 整项透传给 `exam.batchList`）。 */
   examRelationTimeList?: unknown;
   [key: string]: unknown;
@@ -133,6 +143,70 @@ export function extractExamRows(body: unknown): LmsExamRow[] {
 }
 
 /**
+ * 解析考试个人交卷状态（2026-11-13 基于 /utestapi/exams/student 实测响应验证）。
+ *
+ * 实测字段：
+ *  - `answerTimes`: number（0 = 未交卷；>=1 = 已交卷次数；优学院词表 `usedTimesNew: "已用提交次数"`）
+ *  - `limitTimes`: number（允许提交次数；`isLimitTimes === "0"` 或 `limitTimes <= 0` 表示不限次数）
+ *  - `subjective` / `objective`: number | null（主观题/客观题得分；未交卷时均为 null）
+ *
+ * 保守原则（红线 3）：
+ *  - 只有 `answerTimes` 为合法非负数值时才判定 `submitted`（>=1）或 `not_submitted`（===0）；
+ *  - 缺失或类型异常时一律 `unknown`，绝不用 `examState`（考试级状态）推断个人是否交卷。
+ */
+export function resolveExamAttendance(row: LmsExamRow): {
+  attendance: ExamItem['attendance'];
+  answerTimes: number | null;
+  limitTimes: number | null;
+  score: number | null;
+  evidence: string;
+} {
+  const rawAns = row.answerTimes;
+  if (typeof rawAns !== 'number' || !Number.isFinite(rawAns) || rawAns < 0) {
+    return {
+      attendance: 'unknown',
+      answerTimes: null,
+      limitTimes: null,
+      score: null,
+      evidence: `answerTimes=${preview(rawAns)}（缺失或非有效数值，保守置 unknown）`,
+    };
+  }
+
+  const answerTimes = Math.floor(rawAns);
+  const unlimited =
+    row.isLimitTimes === '0' ||
+    row.isLimitTimes === 0 ||
+    typeof row.limitTimes !== 'number' ||
+    !Number.isFinite(row.limitTimes) ||
+    row.limitTimes <= 0;
+  const limitTimes = unlimited ? null : Math.floor(row.limitTimes as number);
+
+  const hasSub = typeof row.subjective === 'number' && Number.isFinite(row.subjective);
+  const hasObj = typeof row.objective === 'number' && Number.isFinite(row.objective);
+  const score =
+    answerTimes >= 1 && (hasSub || hasObj)
+      ? Math.round(
+          ((hasSub ? (row.subjective as number) : 0) + (hasObj ? (row.objective as number) : 0)) * 10,
+        ) / 10
+      : null;
+
+  const attendance: ExamItem['attendance'] = answerTimes >= 1 ? 'submitted' : 'not_submitted';
+  const parts = [
+    `answerTimes=${answerTimes}`,
+    `limitTimes=${limitTimes === null ? 'unlimited' : limitTimes}`,
+  ];
+  if (score !== null) parts.push(`score=${score}`);
+
+  return {
+    attendance,
+    answerTimes,
+    limitTimes,
+    score,
+    evidence: parts.join(' '),
+  };
+}
+
+/**
  * 把一场考试的 `examList[]` 行 + 其 `examRelationTimeList[]` 展开成 **N 条场次项**。
  *
  * 粒度 = 场次（不是考试），理由见证据表 B.5：学生端模板永远 `ko foreach: batchList`，
@@ -187,6 +261,7 @@ export function normalizeExamItems(
     // 只做 allowlist 校验（协议 + 主机），可达性未验证 ⇒ UI 必须容忍链接失效。
     const detailUrlRaw = `${BASE}/utest/#/exam/${encodeURIComponent(examId)}`;
     const detailUrl = isAllowedDetailUrl(SOURCE, detailUrlRaw) ? detailUrlRaw : null;
+    const att = resolveExamAttendance(row);
 
     let emitted = 0;
     /** 时间未知的场次数（用于 warning）。 */
@@ -239,11 +314,11 @@ export function normalizeExamItems(
         endsAt: end?.iso ?? null,
         timePrecision: 'datetime',
         venue,
-        // 红线 3：学生端列表里没有任何字段能可靠回答"我参加了没"（证据表 B.3、C.3），
-        // 一期恒为 unknown；类型层面也不允许出现 'attended' 之类的取值。
-        attendance: 'unknown',
-        attendanceEvidence:
-          '学生端考试列表无个人参加状态字段（exam-evidence.md §B.3/C.3）；本应用不做推断',
+        attendance: att.attendance,
+        attendanceEvidence: att.evidence,
+        answerTimes: att.answerTimes,
+        limitTimes: att.limitTimes,
+        score: att.score,
         firstSeenAt: lastSyncAt,
         lastSeenAt: lastSyncAt,
         lastSyncAt,
@@ -280,9 +355,11 @@ export function normalizeExamItems(
           endsAt: null,
           timePrecision: 'none',
           venue: null,
-          attendance: 'unknown',
-          attendanceEvidence:
-            '学生端考试列表无个人参加状态字段（exam-evidence.md §B.3/C.3）；本应用不做推断',
+          attendance: att.attendance,
+          attendanceEvidence: att.evidence,
+          answerTimes: att.answerTimes,
+          limitTimes: att.limitTimes,
+          score: att.score,
           firstSeenAt: lastSyncAt,
           lastSeenAt: lastSyncAt,
           lastSyncAt,

@@ -198,9 +198,8 @@ function planHomeworkReminders(
 /**
  * 考试提醒。
  *
- * 参加状态恒为 'unknown'（平台列表接口没有可靠字段），因此**永不抑制** —— 漏考
- * 比多提醒一次严重得多。certainty 固定 definite（「几点开考」是客观事实），
- * 但若时间来自未验证字段，UI 会另加「请核对」提示。
+ * 已交过卷（`attendance === 'submitted'`，即 `answerTimes >= 1`）时抑制提醒；
+ * 未交卷（`not_submitted`）或未知（`unknown`）均照常提醒 —— 漏考比多提醒一次严重得多。
  */
 function planExamReminders(
   x: ExamItem,
@@ -208,6 +207,7 @@ function planExamReminders(
   graceMs: number,
 ): PlannedReminder[] {
   const out: PlannedReminder[] = [];
+  if (x.attendance === 'submitted') return out;
   const thresholds = ctx.examThresholds ?? [];
   if (thresholds.length === 0) return out;
 

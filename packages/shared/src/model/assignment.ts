@@ -41,6 +41,14 @@ export type SubmissionStatus = 'not_submitted' | 'submitted' | 'overdue' | 'unkn
  */
 export type DuePrecision = 'datetime' | 'date' | 'none';
 
+/**
+ * 考试个人交卷状态（2026-11-13 基于 /utestapi/exams/student 实测响应验证）：
+ *  - `submitted`：`answerTimes >= 1`（已交过卷，即使允许 2 次只交了 1 次也视为已完成）
+ *  - `not_submitted`：`answerTimes === 0`（尚未交卷）
+ *  - `unknown`：字段缺失或无法解析，保守回退未知
+ */
+export type ExamAttendance = 'not_submitted' | 'submitted' | 'unknown';
+
 /** 列表实体类型。必填 —— 缺失即编译错误，防止 exam 被当成 homework 处理。 */
 export type ListItemKind = 'homework' | 'exam';
 
@@ -117,13 +125,21 @@ export interface ExamItem extends ListItemBase {
   /** 考场/座位（仅展示）。未验证字段名。 */
   venue: { roomName: string | null; seatNo: string | null } | null;
   /**
-   * 个人参加状态。一期**只能**是 'unknown'：列表接口没有任何字段能可靠回答
-   * "我参加了没"（examState 是考试级状态，会把缺考误判为已完成）。
-   * 等拿到真实响应且确认可用的个人状态字段后再扩展此联合类型。
+   * 个人交卷状态（2026-11-13 实测验证）：
+   * 来自 `/utestapi/exams/student` 的 `answerTimes`（优学院官方词表：`已用提交次数`）。
+   *  - `answerTimes >= 1` => `'submitted'`
+   *  - `answerTimes === 0` => `'not_submitted'`
+   *  - 缺失或非预期类型 => `'unknown'`
    */
-  attendance: 'unknown';
-  /** 判定依据（脱敏），便于日后回填真实来源。 */
+  attendance: ExamAttendance;
+  /** 判定依据（脱敏），记录原始 answerTimes / limitTimes / score。 */
   attendanceEvidence: string;
+  /** 已用提交次数（来自 answerTimes；缺失时为 null）。 */
+  answerTimes?: number | null;
+  /** 允许提交次数（来自 limitTimes；isLimitTimes="0" 或 limitTimes=0 不限次数时为 null）。 */
+  limitTimes?: number | null;
+  /** 考试总分（subjective + objective；未交卷或未出分时为 null）。 */
+  score?: number | null;
 }
 
 /** 列表读取的统一返回类型。 */

@@ -12,8 +12,12 @@
  *  - 「全部」= 混排（按统一锚点排序，带类型徽标）；「作业」「考试」= 仅作筛选。
  *
  * 两种实体的时间语义不同，统一用共享模型的助手收窄：
- *  - 锚点 anchorOf()：作业 = dueAt（截止），考试 = startsAt（开考）
- *  - 结束 endOf()：作业 = dueAt，考试 = endsAt ?? startsAt
+ *  - 锚点 anchorOf()：作业 = dueAt（截止），考试 = startsAt（开考）—— **筛选**用
+ *  - 结束 endOf()：作业 = dueAt，考试 = endsAt ?? startsAt —— **排序**用
+ *
+ * 为什么筛选和排序用不同的时间（2026-11-12 用户反馈）：
+ *  - 筛选（「今天内」「3 天内」「剩余」）问的是"什么时候开始/到期"，考试按开考时间合理；
+ *  - 排序问的是"哪个先结束"，考试若按开考排，开考早但结束晚的会把真正临近结束的挤到后面。
  * 详见 packages/shared/src/model/assignment.ts。
  */
 
@@ -127,14 +131,12 @@ export function applyFilter(
       if (!hay.includes(kw)) return false;
     }
 
-    // 状态（作业专有语义，考试按 §8.4 分支）
+    // 状态（作业看 submissionStatus，考试看 attendance）
     if (f.status !== 'all') {
       if (f.status === 'overdue') {
         if (!isExpired(a, nowMs)) return false;
       } else if (isExamItem(a)) {
-        // 考试没有提交状态：submitted / not_submitted 不匹配任何考试行；
-        // unknown = 参加状态未知（一期恒为 unknown，平台未提供可信字段）。
-        if (f.status !== 'unknown') return false;
+        if (a.attendance !== f.status) return false;
       } else if (a.submissionStatus !== f.status) {
         return false;
       }
@@ -184,7 +186,7 @@ export function applyFilter(
   return sortList(out, f.sort, nowMs);
 }
 
-/** 排序。统一用 anchorOf()（作业=dueAt / 考试=startsAt），无锚点置底。 */
+/** 排序。按「结束时刻」endOf()（作业=dueAt / 考试=endsAt，缺失退化 startsAt），无值置底。 */
 export function sortList(
   list: readonly UiAssignment[],
   sort: FilterState['sort'],
@@ -192,38 +194,45 @@ export function sortList(
 ): UiAssignment[] {
   void nowMs;
   const arr = [...list];
-  const anchor = (a: UiAssignment): number => {
-    const d = dueToMs(anchorOf(a));
+  /**
+   * 排序键 = 结束时刻，不是 anchorOf()。
+   *
+   * 考试的锚点是「开考」，但用户关心的是**哪个先结束**：开考早、结束晚的考试
+   * 不该把开考晚、结束早的挤到后面（2026-11-12 用户反馈）。
+   * 作业的结束就是截止时间，因此作业排序行为与此前逐字相同。
+   */
+  const end = (a: UiAssignment): number => {
+    const d = dueToMs(endOf(a));
     return d === null ? Number.MAX_SAFE_INTEGER : d;
   };
 
   switch (sort) {
     case 'dueAsc':
-      // 时间最近的在前；无锚点的置底
+      // 结束时间最近的在前；无结束时间的置底
       arr.sort((x, y) => {
-        const dx = anchor(x);
-        const dy = anchor(y);
+        const dx = end(x);
+        const dy = end(y);
         if (dx !== dy) return dx - dy;
         return x.title.localeCompare(y.title, 'zh-CN');
       });
       break;
     case 'dueDesc':
       arr.sort((x, y) => {
-        const dx = anchor(x);
-        const dy = anchor(y);
+        const dx = end(x);
+        const dy = end(y);
         if (dx !== dy) return dy - dx;
         return x.title.localeCompare(y.title, 'zh-CN');
       });
       break;
     case 'remaining':
-      // 与 dueAsc 同向，但无锚点的明确置底
-      arr.sort((x, y) => anchor(x) - anchor(y));
+      // 与 dueAsc 同向，但无结束时间的明确置底
+      arr.sort((x, y) => end(x) - end(y));
       break;
     case 'course':
       arr.sort((x, y) => {
         const c = (x.courseName ?? '').localeCompare(y.courseName ?? '', 'zh-CN');
         if (c !== 0) return c;
-        return anchor(x) - anchor(y);
+        return end(x) - end(y);
       });
       break;
   }

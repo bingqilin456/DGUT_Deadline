@@ -7,7 +7,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { UlearningAssignmentSource, type LmsCourseRow, type LmsHomeworkRow } from './ulearning-source.js';
+import {
+  UlearningAssignmentSource,
+  buildLmsTokenUrl,
+  classifyLmsLocation,
+  resolveLmsLoginTarget,
+  type LmsCourseRow,
+  type LmsHomeworkRow,
+} from './ulearning-source.js';
+
+/** 应用中心登录页（与实现一致；此处独立断言，避免"测试跟着实现一起错"）。 */
+const PORTAL_LOGIN_TEST = 'https://application.dgut.edu.cn/#/login';
 
 function mkSource(): UlearningAssignmentSource {
   return new UlearningAssignmentSource({ userDataDir: 'C:/tmp/lms-test', headless: true });
@@ -143,3 +153,83 @@ describe('LMS 时间戳解析', () => {
     expect(new Date(1793807940000).toISOString()).toBe('2026-11-04T15:59:00.000Z');
   });
 });
+
+/**
+ * 2026-11-11 修复的回归保护。
+ *
+ * 用户报告的两个 bug：
+ *   图1 点「立即同步」→ 受控 Edge 停在 LMS 课程列表，页面显示「网络错误，点击重新加载」；
+ *   图2 点「登录」→ 打开 https://lms.dgut.edu.cn/sld/pc.html#/login 得到 nginx 404。
+ *
+ * 根因（实测，见 docs/TESTING.md）：
+ *   · `/sld/pc.html` 整目录已永久 404，不能再作为登录入口；
+ *   · 免密参数名是 hash 里的 `token`，旧代码写成查询串/hash 里的 `AUTHORIZATION` 不生效；
+ *   · 「网络错误」是 token 失效的兜底 UI，不是断网。
+ */
+describe('LMS 登录入口选择（图2：不能再去 /sld/pc.html）', () => {
+  it('无论当前在哪个站点，登录目标都绝不是已下线的 sld 页面', () => {
+    const urls = [
+      '',
+      'about:blank',
+      'https://lms.dgut.edu.cn/courseweb/ulearning/index.html#/index/courseList',
+      'https://auth.dgut.edu.cn/authserver/login?service=x',
+      'https://application.dgut.edu.cn/#/portal',
+      'https://hw.dgut.edu.cn/home',
+    ];
+    for (const u of urls) {
+      const t = resolveLmsLoginTarget(u);
+      if (t !== null) {
+        expect(t).not.toContain('/sld/');
+        expect(t).toContain('application.dgut.edu.cn');
+      }
+    }
+  });
+
+  it('停在 LMS 坏页面时，必须主动把窗口带去应用中心（不再留在原页）', () => {
+    const t = resolveLmsLoginTarget('https://lms.dgut.edu.cn/courseweb/ulearning/index.html#/index/courseList');
+    expect(t).toBe(PORTAL_LOGIN_TEST);
+  });
+
+  it('首次使用 / about:blank 时去应用中心登录页', () => {
+    expect(resolveLmsLoginTarget('')).toBe(PORTAL_LOGIN_TEST);
+    expect(resolveLmsLoginTarget('about:blank')).toBe(PORTAL_LOGIN_TEST);
+    expect(resolveLmsLoginTarget('https://hw.dgut.edu.cn/home')).toBe(PORTAL_LOGIN_TEST);
+  });
+
+  it('用户正在中央认证页填验证码时不做任何导航（不打断登录）', () => {
+    expect(resolveLmsLoginTarget('https://auth.dgut.edu.cn/authserver/login?service=x')).toBeNull();
+  });
+
+  it('已在应用中心时不重复导航（避免刷新掉正在进行的登录）', () => {
+    expect(resolveLmsLoginTarget('https://application.dgut.edu.cn/#/login')).toBeNull();
+    expect(resolveLmsLoginTarget('https://application.dgut.edu.cn/#/portal')).toBeNull();
+  });
+});
+
+describe('LMS 站点判定', () => {
+  it('正确区分四个站点', () => {
+    expect(classifyLmsLocation('https://lms.dgut.edu.cn/x')).toBe('lms');
+    expect(classifyLmsLocation('https://auth.dgut.edu.cn/x')).toBe('cas');
+    expect(classifyLmsLocation('https://application.dgut.edu.cn/x')).toBe('portal');
+    expect(classifyLmsLocation('https://hw.dgut.edu.cn/home')).toBe('other');
+  });
+});
+
+describe('LMS 免密 URL 构造（图1：参数名与位置必须是 hash 里的 token）', () => {
+  it('参数名是 token 且位于 hash 段', () => {
+    const u = buildLmsTokenUrl('ABC123');
+    expect(u).toContain('#/index/courseList?token=ABC123');
+    // 必须是 hash 段：?token= 出现在 # 之后
+    expect(u.indexOf('token=')).toBeGreaterThan(u.indexOf('#'));
+  });
+
+  it('不产生旧版的错误写法 ?AUTHORIZATION=', () => {
+    const u = buildLmsTokenUrl('ABC123');
+    expect(u).not.toContain('AUTHORIZATION');
+  });
+
+  it('token 被正确编码（不会破坏 hash 查询串）', () => {
+    expect(buildLmsTokenUrl('a+b/c&d')).toContain('token=a%2Bb%2Fc%26d');
+  });
+});
+
